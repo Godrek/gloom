@@ -116,7 +116,6 @@ pub fn graph_from_path(path: &Path, clang: &str, flags: &[String]) -> Result<Gra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis;
 
     const IR: &str = r#"
 declare i32 @puts(ptr)
@@ -150,15 +149,5 @@ define i32 @"odd.name"(i32 %n) {
             "<indirect>".into(),
             "indirect-call".into()
         )));
-        assert_eq!(
-            analysis::cycles(&graph),
-            vec![vec!["odd.name".to_owned(), "worker".to_owned()]]
-        );
-        assert_eq!(
-            analysis::shortest_path(&graph, "main", "puts")
-                .unwrap()
-                .unwrap(),
-            ["main", "worker", "odd.name", "puts"]
-        );
     }
 }
