@@ -28,9 +28,9 @@ traversal. Its `call_count` is a count of merged static occurrences, not runtime
 invocations. Its zero-incoming function query is not a semantic entry-point
 analysis.
 
-Schema 1.0 and the CLI are pre-stable prototype interfaces. They may change as
-the evidence and identity model is implemented; no compatibility window is
-promised yet.
+Schema 1.0, the CLI, and the Rust library API are pre-stable prototype
+interfaces. They may change as the evidence and identity model is implemented;
+no compatibility window is promised yet.
 
 ## Install
 
