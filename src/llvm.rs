@@ -81,15 +81,17 @@ impl EvidenceContributor for LlvmTextContributor {
     fn contribute(&self, input: &Path) -> Result<EvidenceContribution, String> {
         let acquired = acquire_llvm_ir(input, &self.clang, &self.clang_flags)?;
         let observations = observe_llvm_ir(&acquired.text)?;
+        let content_fingerprint = fingerprint_parts(&[&acquired.text]);
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
+                evidence_artifact: evidence_artifact(input, &acquired.kind, &content_fingerprint),
                 media_type: "application/llvm-ir".into(),
-                acquisition_method: match acquired.kind {
+                acquisition_method: match &acquired.kind {
                     AcquiredInputKind::TextualLlvmIr => "declared-artifact".into(),
                     AcquiredInputKind::CCompiledToLlvmIr => "compiled-source".into(),
                 },
-                content_fingerprint: fingerprint_parts(&[&acquired.text]),
+                content_fingerprint,
             },
             callables: observations
                 .functions
@@ -117,6 +119,15 @@ impl EvidenceContributor for LlvmTextContributor {
                 })
                 .collect(),
         })
+    }
+}
+
+fn evidence_artifact(path: &Path, kind: &AcquiredInputKind, fingerprint: &str) -> String {
+    match kind {
+        AcquiredInputKind::TextualLlvmIr => path.display().to_string(),
+        AcquiredInputKind::CCompiledToLlvmIr => {
+            format!("generated LLVM IR {fingerprint} from {}", path.display())
+        }
     }
 }
 
@@ -309,5 +320,17 @@ define i32 @"odd.name"(i32 %n) {
             "<indirect>".into(),
             "indirect-call".into()
         )));
+    }
+
+    #[test]
+    fn labels_compiled_source_locations_as_generated_llvm_ir() {
+        assert_eq!(
+            evidence_artifact(
+                Path::new("fixture.c"),
+                &AcquiredInputKind::CCompiledToLlvmIr,
+                "fnv1a64:0123456789abcdef",
+            ),
+            "generated LLVM IR fnv1a64:0123456789abcdef from fixture.c"
+        );
     }
 }

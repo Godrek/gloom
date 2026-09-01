@@ -143,6 +143,7 @@ impl ObservationContext {
 pub struct AcquiredInput {
     pub id: AcquiredInputId,
     pub path: String,
+    pub evidence_artifact: String,
     pub media_type: String,
     pub acquisition_method: String,
     pub content_fingerprint: String,
@@ -151,7 +152,7 @@ pub struct AcquiredInput {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub input_id: AcquiredInputId,
-    pub path: String,
+    pub artifact: String,
     pub line: usize,
 }
 
@@ -390,12 +391,12 @@ impl PublishedSnapshot {
                 ));
             }
         }
-        let input_ids: BTreeSet<_> = self
+        let inputs_by_id: BTreeMap<_, _> = self
             .acquired_inputs
             .iter()
-            .map(|input| input.id.as_str())
+            .map(|input| (input.id.as_str(), input))
             .collect();
-        if input_ids.len() != self.acquired_inputs.len() {
+        if inputs_by_id.len() != self.acquired_inputs.len() {
             return Err("published snapshot contains duplicate acquired-input identities".into());
         }
         let entities_by_id: BTreeMap<_, _> = self
@@ -442,12 +443,14 @@ impl PublishedSnapshot {
             return Err("published snapshot contains duplicate evidence identities".into());
         }
         for evidence in &self.evidence_records {
-            if !input_ids.contains(evidence.acquired_input_id.as_str()) {
-                return Err(format!(
-                    "evidence '{}' references unknown acquired input '{}'",
-                    evidence.id, evidence.acquired_input_id
-                ));
-            }
+            let acquired_input = inputs_by_id
+                .get(evidence.acquired_input_id.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "evidence '{}' references unknown acquired input '{}'",
+                        evidence.id, evidence.acquired_input_id
+                    )
+                })?;
             if !context_ids.contains(evidence.observation_context_id.as_str()) {
                 return Err(format!(
                     "evidence '{}' references unknown observation context '{}'",
@@ -474,6 +477,12 @@ impl PublishedSnapshot {
                     evidence.id
                 ));
             }
+            if evidence.source_location.artifact != acquired_input.evidence_artifact {
+                return Err(format!(
+                    "evidence '{}' location does not identify its acquired evidence artifact",
+                    evidence.id
+                ));
+            }
             for manifestation_id in &evidence.related_manifestation_ids {
                 if !manifestations_by_id.contains_key(manifestation_id.as_str()) {
                     return Err(format!(
@@ -490,6 +499,14 @@ impl PublishedSnapshot {
             .collect();
         if derivations_by_claim.len() != self.derivations.len() {
             return Err("published snapshot contains duplicate claim derivations".into());
+        }
+        let claim_ids: BTreeSet<_> = self
+            .target_claims
+            .iter()
+            .map(|claim| claim.id.as_str())
+            .collect();
+        if claim_ids.len() != self.target_claims.len() {
+            return Err("published snapshot contains duplicate target-claim identities".into());
         }
         for claim in &self.target_claims {
             let call_site = entities_by_id
@@ -688,9 +705,11 @@ pub(crate) fn publish(
         contribution.validate()?;
         let input_id = AcquiredInputId::new(format!("input:{snapshot_id}:{input_index}"));
         let path_text = contribution.input.path.clone();
+        let evidence_artifact = contribution.input.evidence_artifact.clone();
         acquired_inputs.push(AcquiredInput {
             id: input_id.clone(),
             path: path_text.clone(),
+            evidence_artifact: evidence_artifact.clone(),
             media_type: contribution.input.media_type,
             acquisition_method: contribution.input.acquisition_method,
             content_fingerprint: contribution.input.content_fingerprint,
@@ -742,14 +761,14 @@ pub(crate) fn publish(
             ));
             let location = SourceLocation {
                 input_id: input_id.clone(),
-                path: path_text.clone(),
+                artifact: evidence_artifact.clone(),
                 line: call.line,
             };
             program_entities.push(ProgramEntity {
                 id: call_site_id.clone(),
                 display_name: format!(
                     "{} call at {}:{}",
-                    call.caller_display_name, path_text, call.line
+                    call.caller_display_name, evidence_artifact, call.line
                 ),
                 kind: ProgramEntityKind::CallSite,
                 caller_entity_id: Some(caller.entity_id.clone()),

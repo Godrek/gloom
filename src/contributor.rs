@@ -19,6 +19,7 @@ pub enum EvidenceCapability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedInput {
     pub path: String,
+    pub evidence_artifact: String,
     pub media_type: String,
     pub acquisition_method: String,
     pub content_fingerprint: String,
@@ -84,6 +85,7 @@ impl EvidenceContribution {
     pub(crate) fn validate(&self) -> Result<(), String> {
         for (field, value) in [
             ("path", self.input.path.as_str()),
+            ("evidence artifact", self.input.evidence_artifact.as_str()),
             ("media type", self.input.media_type.as_str()),
             ("acquisition method", self.input.acquisition_method.as_str()),
             (
@@ -119,9 +121,20 @@ impl EvidenceContribution {
 pub(crate) fn fingerprint_parts(parts: &[&str]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for part in parts {
-        for byte in part.len().to_le_bytes().iter().chain(part.as_bytes()) {
+        let length = u64::try_from(part.len()).expect("string length must fit in u64");
+        for byte in length.to_le_bytes().iter().chain(part.as_bytes()) {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
         }
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_uses_fixed_width_length_prefixes() {
+        assert_eq!(fingerprint_parts(&["a", "bc"]), "fnv1a64:ba1e1f0e0704d8ea");
+    }
 }

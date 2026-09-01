@@ -139,8 +139,20 @@ fn explains_one_direct_call_from_evidence_to_projection() {
         .unwrap_err();
     assert!(error.contains("does not match its target claim"));
 
+    let mut duplicate_claim_export = exported.clone();
+    let duplicate_claim = duplicate_claim_export["target_claims"][0].clone();
+    duplicate_claim_export["target_claims"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate_claim);
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&duplicate_claim_export).unwrap())
+        .unwrap_err();
+    assert!(error.contains("duplicate target-claim identities"));
+
     let html = application.render_snapshot_viewer(&snapshot).unwrap();
     assert!(html.contains(&serde_json::to_string(relationship).unwrap()));
+    assert!(html.contains("<button type=\"button\" class=\"summary\" aria-expanded=\"false\">"));
     assert!(html.contains("caller"));
     assert!(html.contains("callee"));
     assert!(html.contains(relationship.explanation_handle.as_str()));
