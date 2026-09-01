@@ -19,6 +19,8 @@ validates only a small part of that direction.
 - Export schema 1.0 JSON.
 - Generate a self-contained HTML viewer with search, pan, zoom, drag, cycle
   highlighting, and caller/callee inspection.
+- Publish an evidence-backed snapshot for direct LLVM calls, query its named
+  callees, and expand compact explanation handles into evidence and derivations.
 
 ## Prototype limitations
 
@@ -63,6 +65,35 @@ clang -S -emit-llvm -g -O0 source.c -o source.ll
 gloom build source.ll -o graph.json
 gloom view graph.json -o graph.html
 ```
+
+The evidence-model migration is available alongside those prototype commands.
+Publish a fully qualified static observation context and an optional
+self-contained evidence viewer:
+
+```bash
+gloom publish tests/fixtures/direct-call.ll \
+  --snapshot-id direct-call-example-v1 \
+  --target direct-call-example \
+  --build-configuration debug \
+  --toolchain "textual LLVM IR" \
+  --analysis-stage "llvm-ir extraction" \
+  -o snapshot.json \
+  --html snapshot.html
+```
+
+Query the stored call-graph projection and expand the returned explanation
+handle without rerunning extraction or reconstructing the relationship:
+
+```bash
+gloom query-snapshot snapshot.json --callees caller
+gloom query-snapshot snapshot.json --explain \
+  explanation:claim:direct-call-example-v1:input:0:direct-target:0
+gloom view-snapshot snapshot.json -o snapshot.html
+```
+
+The published snapshot format is currently `2.0-pre`. The existing `build`,
+`analyze`, and `view` commands continue to use the legacy schema 1.0 path during
+the migration.
 
 Open `graph.html` directly or serve the directory with
 `python3 -m http.server 8000`, then visit

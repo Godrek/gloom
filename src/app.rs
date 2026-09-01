@@ -1,6 +1,10 @@
 use crate::analysis;
+use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
+use crate::snapshot::{
+    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, PublishedSnapshot,
+};
 use crate::viewer;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -16,6 +20,11 @@ pub enum Query {
     ShortestPath { start: String, end: String },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NamedQuery {
+    Callees { caller_name: String },
+}
+
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum QueryResult {
@@ -26,6 +35,55 @@ pub enum QueryResult {
 }
 
 impl Application {
+    pub fn publish_snapshot<C: EvidenceContributor + ?Sized>(
+        &self,
+        inputs: &[PathBuf],
+        context: ObservationContext,
+        contributor: &C,
+    ) -> Result<PublishedSnapshot, String> {
+        let identity = contributor.identity();
+        let contributions = inputs
+            .iter()
+            .map(|input| contributor.contribute(input))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::snapshot::publish(contributions, identity, context)
+    }
+
+    pub fn query_snapshot(
+        &self,
+        snapshot: &PublishedSnapshot,
+        query: NamedQuery,
+    ) -> Result<NamedQueryResult, String> {
+        match query {
+            NamedQuery::Callees { caller_name } => snapshot.query_callees(&caller_name),
+        }
+    }
+
+    pub fn explain_snapshot(
+        &self,
+        snapshot: &PublishedSnapshot,
+        handle: &ExplanationHandle,
+    ) -> Result<Explanation, String> {
+        snapshot.explain(handle)
+    }
+
+    pub fn export_snapshot_json(&self, snapshot: &PublishedSnapshot) -> Result<String, String> {
+        let mut text = serde_json::to_string_pretty(snapshot).map_err(|error| error.to_string())?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    pub fn load_snapshot_json(&self, text: &str) -> Result<PublishedSnapshot, String> {
+        let snapshot: PublishedSnapshot =
+            serde_json::from_str(text).map_err(|error| error.to_string())?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    pub fn render_snapshot_viewer(&self, snapshot: &PublishedSnapshot) -> Result<String, String> {
+        viewer::render_snapshot_html(snapshot)
+    }
+
     pub fn build(
         &self,
         inputs: &[PathBuf],
