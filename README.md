@@ -17,20 +17,25 @@ validates only a small part of that direction.
 - Detect recursive strongly connected components.
 - Query zero-incoming functions, reachability, and shortest call paths.
 - Export schema 1.0 JSON.
+- Query direct calls by callee and expand evidence-backed explanations.
 - Generate a self-contained HTML viewer with search, pan, zoom, drag, cycle
-  highlighting, and caller/callee inspection.
+  highlighting, caller/callee inspection, and evidence-backed call
+  explanations.
 
 ## Prototype limitations
 
-The current model uses LLVM symbol names as identities, merges all unresolved
-indirect calls into one placeholder, and treats all stored edges alike during
-traversal. Its `call_count` is a count of merged static occurrences, not runtime
-invocations. Its zero-incoming function query is not a semantic entry-point
-analysis.
+The legacy projection uses LLVM symbol names as identities, merges all
+unresolved indirect calls into one placeholder, and treats all stored edges
+alike during traversal. Evidence-backed direct calls use snapshot-scoped
+callable identities, qualify translation-unit-local callables by their acquired
+input, and model first-class call sites, but they do not yet replace those
+legacy behaviors. `call_count` is a count of merged static occurrences, not
+runtime invocations. The zero-incoming function query is not a semantic
+entry-point analysis.
 
 Schema 1.0, the CLI, and the Rust library API are pre-stable prototype
-interfaces. They may change as the evidence and identity model is implemented;
-no compatibility window is promised yet.
+interfaces. They may change as the evidence-backed model expands; no
+compatibility window is promised yet.
 
 ## Install
 
@@ -48,7 +53,21 @@ gloom build examples/demo.c -o graph.json --html graph.html
 gloom analyze graph.json --cycles
 gloom analyze graph.json --reachable main
 gloom analyze graph.json --path main cleanup
+gloom analyze graph.json --callee cleanup
+gloom analyze graph.json --explain '<explanation_handle from --callee>'
 ```
+
+The named-callee query returns matching caller/callee relationships and a
+compact `explanation_handle` for each. Pass that handle unchanged to
+`--explain` to retrieve its supporting evidence, observation context, and
+derivation.
+
+For C and preprocessed C inputs, explanation line coordinates refer to an
+explicit `<generated-llvm-ir>` acquisition produced by Clang. The original
+input path remains the observation target; the coordinates are not C source
+line numbers. `--clang` uses platform executable lookup (including `PATHEXT` on
+Windows), and the observation context records the resolved invocation path,
+canonical executable path, and reported compiler version.
 
 Or run without installing:
 

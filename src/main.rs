@@ -38,12 +38,18 @@ enum Commands {
     /// Query an existing graph.
     Analyze {
         graph: PathBuf,
-        #[arg(long, conflicts_with_all = ["reachable", "path"])]
+        #[arg(long, conflicts_with_all = ["reachable", "path", "callee", "explain"])]
         cycles: bool,
-        #[arg(long, conflicts_with = "path")]
+        #[arg(long, conflicts_with_all = ["path", "callee", "explain"])]
         reachable: Option<String>,
-        #[arg(long, num_args = 2, value_names = ["FROM", "TO"])]
+        #[arg(long, conflicts_with_all = ["callee", "explain"], num_args = 2, value_names = ["FROM", "TO"])]
         path: Option<Vec<String>>,
+        /// Run the named direct-call query for a callee.
+        #[arg(long, conflicts_with = "explain")]
+        callee: Option<String>,
+        /// Expand an explanation handle returned by --callee.
+        #[arg(long)]
+        explain: Option<String>,
     },
 }
 
@@ -90,6 +96,8 @@ fn run() -> Result<(), String> {
             cycles,
             reachable,
             path,
+            callee,
+            explain,
         } => {
             let document = application
                 .load_json(&read(&graph)?)
@@ -103,6 +111,10 @@ fn run() -> Result<(), String> {
                     start: points[0].clone(),
                     end: points[1].clone(),
                 }
+            } else if let Some(callee) = callee {
+                Query::CallsToNamedCallee { callee }
+            } else if let Some(handle) = explain {
+                Query::Explain { handle }
             } else {
                 Query::Summary
             };
