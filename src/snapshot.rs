@@ -307,9 +307,19 @@ pub struct TargetClaim {
     pub evidence_ids: Vec<EvidenceId>,
 }
 
+/// The only correspondence rule the core currently derives. A contributor
+/// asserts one contributor callable identity for a callable in each of its
+/// observation contexts; when that identity appears in more than one context
+/// of the same acquired input, the manifestations correspond. Display names
+/// never participate, and the claim cites the evidence that placed each
+/// manifestation in its context so the derivation can be recomputed.
+pub const CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE: &str =
+    "correspondence-from-contributor-callable-identity";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CorrespondenceClaim {
     pub id: CorrespondenceClaimId,
+    pub rule: String,
     pub acquired_input_id: AcquiredInputId,
     pub contributor_callable_id: String,
     pub manifestation_ids: Vec<ManifestationId>,
@@ -698,17 +708,23 @@ impl PublishedSnapshot {
                     manifestation.contributor_callable_id, manifestation.observation_context_id
                 ));
             }
-            if entity_contexts
-                .insert(
-                    manifestation.entity_id.as_str(),
-                    manifestation.observation_context_id.as_str(),
-                )
-                .is_some_and(|existing| existing != manifestation.observation_context_id.as_str())
-            {
-                return Err(format!(
-                    "program entity '{}' is merged across observation contexts without correspondence evidence",
-                    manifestation.entity_id
-                ));
+            match entity_contexts.insert(
+                manifestation.entity_id.as_str(),
+                manifestation.observation_context_id.as_str(),
+            ) {
+                Some(existing) if existing != manifestation.observation_context_id.as_str() => {
+                    return Err(format!(
+                        "program entity '{}' is merged across observation contexts without correspondence evidence",
+                        manifestation.entity_id
+                    ));
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "program entity '{}' merges distinct contributor callable identities in observation context '{}'",
+                        manifestation.entity_id, manifestation.observation_context_id
+                    ));
+                }
+                None => {}
             }
         }
         for callable in self
@@ -817,6 +833,12 @@ impl PublishedSnapshot {
         let mut correspondence_references = BTreeSet::new();
         let mut correspondence_ids_by_manifestation: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for claim in &self.correspondence_claims {
+            if claim.rule != CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE {
+                return Err(format!(
+                    "correspondence claim '{}' uses unknown derivation rule '{}'",
+                    claim.id, claim.rule
+                ));
+            }
             if claim.contributor_callable_id.trim().is_empty() {
                 return Err(format!(
                     "correspondence claim '{}' has an empty contributor callable identity",
@@ -1657,6 +1679,18 @@ pub(crate) fn publish(
         );
     }
 
+    let mut evidence_ids_by_manifestation: BTreeMap<
+        (&AcquiredInputId, &ManifestationId),
+        Vec<&EvidenceId>,
+    > = BTreeMap::new();
+    for evidence in &evidence_records {
+        for manifestation_id in &evidence.related_manifestation_ids {
+            evidence_ids_by_manifestation
+                .entry((&evidence.acquired_input_id, manifestation_id))
+                .or_default()
+                .push(&evidence.id);
+        }
+    }
     let mut correspondence_claims = Vec::new();
     for seed in correspondence_seeds {
         let mut evidence_ids = BTreeSet::new();
@@ -1664,18 +1698,13 @@ pub(crate) fn publish(
             .manifestation_ids
             .into_iter()
             .filter(|manifestation_id| {
-                let related_evidence = evidence_records.iter().filter(|evidence| {
-                    evidence.acquired_input_id == seed.acquired_input_id
-                        && evidence
-                            .related_manifestation_ids
-                            .contains(manifestation_id)
-                });
-                let mut found = false;
-                for evidence in related_evidence {
-                    found = true;
-                    evidence_ids.insert(evidence.id.clone());
-                }
-                found
+                let Some(related) =
+                    evidence_ids_by_manifestation.get(&(&seed.acquired_input_id, manifestation_id))
+                else {
+                    return false;
+                };
+                evidence_ids.extend(related.iter().map(|id| (*id).clone()));
+                true
             })
             .collect::<Vec<_>>();
         if manifestation_ids.len() < 2 {
@@ -1687,6 +1716,7 @@ pub(crate) fn publish(
                 "correspondence:{snapshot_id}:input:{}:callable:{correspondence_index}",
                 seed.input_index
             )),
+            rule: CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE.into(),
             acquired_input_id: seed.acquired_input_id,
             contributor_callable_id: seed.contributor_callable_id,
             manifestation_ids,

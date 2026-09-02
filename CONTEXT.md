@@ -48,6 +48,18 @@ _Avoid_: Callee edge, resolved call
 The degree to which a call site's possible targets are known: complete, partial, or absent. Resolution is independent of the kinds of evidence supporting individual target claims.
 _Avoid_: Confidence, certainty
 
+**Evidence scope**:
+Whether an evidence record describes static program structure or an observed runtime execution. Runtime-scoped evidence holds only in an observation context that names its workload.
+_Avoid_: Evidence kind, confidence level
+
+**Evidence support**:
+What an evidence record supports: a call site's target-set resolution or one target claim. Support keeps resolution evidence and target evidence from being substituted for one another.
+_Avoid_: Evidence role, edge weight
+
+**Contributor callable identity**:
+The identity an evidence contributor asserts for a callable within one observation context. It is the contributor's claim of sameness across its own contexts and is distinct from a display name.
+_Avoid_: Symbol name, function name
+
 **Build-scoped source projection**:
 A source-oriented projection for one real compilation, with source correspondence wherever evidence preserves it. It does not reconstruct language-level meaning that its evidence sources have erased.
 _Avoid_: Source-faithful graph, source graph

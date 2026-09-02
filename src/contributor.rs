@@ -3,7 +3,17 @@ use crate::snapshot::{
 };
 use std::path::Path;
 
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
+/// Version of the seam between evidence contributors and the core model.
+///
+/// History:
+/// - `1`: callable manifestations plus direct calls keyed by display name, one
+///   observation context per publication.
+/// - `2`: contributors declare their observation contexts, assert a contributor
+///   callable identity per manifestation, and contribute first-class call sites
+///   with per-site target-set resolution, typed evidence (scope and support),
+///   and zero or more target claims. Indirect-call evidence became a declared
+///   capability.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -329,28 +339,18 @@ mod tests {
         assert_eq!(fingerprint_parts(&["a", "bc"]), "fnv1a64:ba1e1f0e0704d8ea");
     }
 
-    #[test]
-    fn contributor_capabilities_are_declarations_not_a_mandatory_checklist() {
+    fn direct_call_contribution(
+        contributor: &ContributorIdentity,
+    ) -> (EvidenceContribution, ObservationContext) {
         let context = ObservationContext::static_analysis(
             "snapshot:fixture",
             "fixture",
             "debug",
             "fixture toolchain",
-            "fixture.direct-only",
-            "1",
+            contributor.name.clone(),
+            contributor.version.clone(),
             "fixture extraction",
         );
-        let direct_only = ContributorIdentity {
-            name: "fixture.direct-only".into(),
-            version: "1".into(),
-            contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
-            capabilities: vec![
-                EvidenceCapability::CallableManifestations,
-                EvidenceCapability::DirectCallEvidence,
-            ],
-        };
-        direct_only.validate().unwrap();
-
         let contribution = EvidenceContribution {
             input: ContributedInput {
                 path: "fixture".into(),
@@ -391,15 +391,59 @@ mod tests {
                 }],
             }],
         };
-        contribution.validate(&direct_only, &context).unwrap();
+        (contribution, context)
+    }
 
-        let callable_only = ContributorIdentity {
-            name: "fixture.callable-only".into(),
+    fn identity(name: &str, capabilities: Vec<EvidenceCapability>) -> ContributorIdentity {
+        ContributorIdentity {
+            name: name.into(),
             version: "1".into(),
             contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
-            capabilities: vec![EvidenceCapability::CallableManifestations],
-        };
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn contributor_capabilities_are_declarations_not_a_mandatory_checklist() {
+        let direct_only = identity(
+            "fixture.direct-only",
+            vec![
+                EvidenceCapability::CallableManifestations,
+                EvidenceCapability::DirectCallEvidence,
+            ],
+        );
+        direct_only.validate().unwrap();
+        let (contribution, context) = direct_call_contribution(&direct_only);
+        contribution.validate(&direct_only, &context).unwrap();
+
+        let callable_only = identity(
+            "fixture.callable-only",
+            vec![EvidenceCapability::CallableManifestations],
+        );
+        callable_only.validate().unwrap();
+        let (contribution, context) = direct_call_contribution(&callable_only);
         let error = contribution.validate(&callable_only, &context).unwrap_err();
-        assert!(error.contains("does not declare capability DirectCallEvidence"));
+        assert!(
+            error.contains("does not declare capability DirectCallEvidence"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn contributed_contexts_must_name_the_validating_contributor() {
+        let direct_only = identity(
+            "fixture.direct-only",
+            vec![
+                EvidenceCapability::CallableManifestations,
+                EvidenceCapability::DirectCallEvidence,
+            ],
+        );
+        let (contribution, context) = direct_call_contribution(&direct_only);
+        let other = identity("fixture.other", direct_only.capabilities.clone());
+        let error = contribution.validate(&other, &context).unwrap_err();
+        assert!(
+            error.contains("does not match contributed observation context"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -353,24 +353,58 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
     Ok(tokens)
 }
 
+fn matching_right_parenthesis(tokens: &[LlvmToken], start: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match &token.kind {
+            LlvmTokenKind::LeftParenthesis => depth += 1,
+            LlvmTokenKind::RightParenthesis => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
+    matches!(
+        tokens[index].kind,
+        LlvmTokenKind::Global(_) | LlvmTokenKind::Local
+    ) && tokens
+        .get(index + 1)
+        .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
+}
+
+/// Finds the callee operand of a `call` or `invoke` instruction.
+///
+/// The callee is the last `@global(` or `%local(` operand before the argument
+/// list. A named type can also precede a parenthesised list when the
+/// instruction spells out its function type, as in `call %Pair (i32, ...)
+/// @callee(i32 1)`; that operand is a type, not the callee, so the search
+/// continues past its parameter list when another callee-shaped operand
+/// follows it.
 fn call_target(tokens: &[LlvmToken], call_index: usize) -> Option<ObservedCallTarget> {
     let mut index = call_index + 1;
     while index < tokens.len() {
         match &tokens[index].kind {
             LlvmTokenKind::Word(word) if word == "asm" => return None,
-            LlvmTokenKind::Global(name)
-                if tokens
-                    .get(index + 1)
-                    .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis) =>
-            {
-                return Some(ObservedCallTarget::Direct(name.clone()));
-            }
-            LlvmTokenKind::Local
-                if tokens
-                    .get(index + 1)
-                    .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis) =>
-            {
-                return Some(ObservedCallTarget::Indirect);
+            LlvmTokenKind::Global(_) | LlvmTokenKind::Local if is_callee_operand(tokens, index) => {
+                let arguments_end = matching_right_parenthesis(tokens, index + 1);
+                if let Some(next) = arguments_end.map(|end| end + 1)
+                    && next < tokens.len()
+                    && is_callee_operand(tokens, next)
+                {
+                    index = next;
+                    continue;
+                }
+                return Some(match &tokens[index].kind {
+                    LlvmTokenKind::Global(name) => ObservedCallTarget::Direct(name.clone()),
+                    _ => ObservedCallTarget::Indirect,
+                });
             }
             LlvmTokenKind::RightBrace => break,
             LlvmTokenKind::Word(word) if word == "call" || word == "invoke" => break,

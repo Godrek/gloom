@@ -1,10 +1,10 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
-    ProgramEntityKind, Resolution,
+    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, ContributedCallKind, ContributedCallSite,
+    ContributedCallable, ContributedEvidence, ContributedInput, ContributedTargetClaim,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
+    ObservationContext, ProgramEntityKind, Resolution,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -443,6 +443,30 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
         .unwrap_err();
     assert!(error.contains("has no caller manifestation in observation context"));
 
+    let static_worker_b = snapshot
+        .manifestations()
+        .iter()
+        .find(|manifestation| manifestation.representation == "static-worker-b")
+        .unwrap();
+    let mut same_context_collapse = serde_json::to_value(&snapshot).unwrap();
+    same_context_collapse["manifestations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|manifestation| manifestation["id"] == serde_json::json!(static_worker_b.id))
+        .unwrap()["entity_id"] = serde_json::json!(static_worker.entity_id);
+    same_context_collapse["program_entities"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entity| entity["id"] != serde_json::json!(static_worker_b.entity_id));
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&same_context_collapse).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("merges distinct contributor callable identities"),
+        "unexpected error: {error}"
+    );
+
     let path = std::env::temp_dir().join(format!(
         "gloom-same-label-callers-{}.json",
         std::process::id()
@@ -637,6 +661,10 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     );
     let correspondence = snapshot.correspondence_claims().first().unwrap();
     assert_eq!(snapshot.correspondence_claims().len(), 1);
+    assert_eq!(
+        correspondence.rule,
+        CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE
+    );
     assert_eq!(correspondence.contributor_callable_id, "first_target");
     assert_eq!(
         correspondence
@@ -655,13 +683,16 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     );
     assert_eq!(
         static_target.correspondence_claim_ids,
-        [correspondence.id.clone()]
+        std::slice::from_ref(&correspondence.id)
     );
     assert_eq!(
         runtime_target.correspondence_claim_ids,
-        [correspondence.id.clone()]
+        std::slice::from_ref(&correspondence.id)
     );
-    assert_eq!(result.correspondence_claims, [correspondence.clone()]);
+    assert_eq!(
+        result.correspondence_claims,
+        std::slice::from_ref(correspondence)
+    );
     let static_relationship = result
         .relationships
         .iter()
@@ -691,7 +722,7 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     assert_eq!(runtime_relationship.resolution, Resolution::Partial);
     assert_eq!(
         runtime_relationship.correspondence_claim_ids,
-        [correspondence.id.clone()]
+        std::slice::from_ref(&correspondence.id)
     );
     assert!(
         serde_json::to_value(static_claim)
@@ -725,7 +756,10 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     let explanation = application
         .explain_snapshot(&snapshot, &call_site.explanation_handle)
         .unwrap();
-    assert_eq!(explanation.correspondence_claims, [correspondence.clone()]);
+    assert_eq!(
+        explanation.correspondence_claims,
+        std::slice::from_ref(correspondence)
+    );
 
     let mut mismatched_projection_export = exported.clone();
     let runtime_relationship_export =
@@ -772,6 +806,7 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     assert!(html.contains("Target contexts"));
     assert!(html.contains("Target correspondence"));
     assert!(html.contains(correspondence.id.as_str()));
+    assert!(html.contains(CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE));
     assert!(html.contains(&correspondence.contributor_callable_id));
     assert!(html.contains("Resolution context"));
     assert!(html.contains(runtime_context.id.as_str()));
@@ -785,6 +820,17 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
         .load_snapshot_json(&serde_json::to_string(&missing_relationship_export).unwrap())
         .unwrap_err();
     assert!(error.contains("exactly one relationship for every target claim"));
+
+    let mut unknown_rule_export = exported.clone();
+    unknown_rule_export["correspondence_claims"][0]["rule"] =
+        serde_json::json!("same-display-name");
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&unknown_rule_export).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("unknown derivation rule"),
+        "unexpected error: {error}"
+    );
 
     let mut unsupported_correspondence_export = exported.clone();
     unsupported_correspondence_export["correspondence_claims"][0]["evidence_ids"]
@@ -1003,6 +1049,65 @@ fn llvm_metadata_and_aggregate_prefixes_preserve_instruction_boundaries() {
         Resolution::Absent
     );
     assert!(aggregate_prefix.call_sites[0].targets.is_empty());
+}
+
+#[test]
+fn explicit_function_types_do_not_hide_the_callee_operand() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:named-type-call-fixture",
+        "named-type-call-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/named-type-calls.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: "named_type_caller".into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [Resolution::Complete, Resolution::Absent, Resolution::Absent]
+    );
+    assert_eq!(result.relationships.len(), 1);
+    assert_eq!(result.relationships[0].callee_display_name, "returns_pair");
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                snapshot
+                    .program_entities()
+                    .iter()
+                    .find(|entity| entity.id == site.call_site_id)
+                    .unwrap()
+                    .source_location
+                    .as_ref()
+                    .unwrap()
+                    .line
+            })
+            .collect::<Vec<_>>(),
+        [7, 8, 9]
+    );
 }
 
 #[test]
