@@ -1111,6 +1111,65 @@ fn explicit_function_types_do_not_hide_the_callee_operand() {
 }
 
 #[test]
+fn literal_aggregate_return_types_do_not_end_the_callee_search() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:aggregate-return-call-fixture",
+        "aggregate-return-call-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/aggregate-return-calls.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: "aggregate_return_caller".into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [Resolution::Complete, Resolution::Absent]
+    );
+    assert_eq!(result.relationships.len(), 1);
+    assert_eq!(result.relationships[0].callee_display_name, "pair");
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                snapshot
+                    .program_entities()
+                    .iter()
+                    .find(|entity| entity.id == site.call_site_id)
+                    .unwrap()
+                    .source_location
+                    .as_ref()
+                    .unwrap()
+                    .line
+            })
+            .collect::<Vec<_>>(),
+        [6, 8]
+    );
+}
+
+#[test]
 fn quoted_identifier_braces_do_not_hide_following_indirect_calls() {
     let application = Application;
     let context = ObservationContext::static_analysis(

@@ -381,6 +381,11 @@ fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
 
 /// Finds the callee operand of a `call` or `invoke` instruction.
 ///
+/// `tokens` must end at the enclosing function body's closing brace, so the
+/// search is bounded by the next call opcode or the end of the body rather
+/// than by braces: a literal aggregate return type such as
+/// `call { i32, i32 } @pair()` legitimately contains `}` before the callee.
+///
 /// The callee is the last `@global(` or `%local(` operand before the argument
 /// list. A named type can also precede a parenthesised list when the
 /// instruction spells out its function type, as in `call %Pair (i32, ...)
@@ -406,7 +411,6 @@ fn call_target(tokens: &[LlvmToken], call_index: usize) -> Option<ObservedCallTa
                     _ => ObservedCallTarget::Indirect,
                 });
             }
-            LlvmTokenKind::RightBrace => break,
             LlvmTokenKind::Word(word) if word == "call" || word == "invoke" => break,
             _ => index += 1,
         }
