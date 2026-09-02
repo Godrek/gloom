@@ -307,6 +307,11 @@ pub struct TargetClaim {
     pub evidence_ids: Vec<EvidenceId>,
 }
 
+/// The only target-claim derivation rule the core currently produces: a
+/// target claim is derived directly from the contributed evidence that names
+/// the target, without any core-side inference.
+pub const CONTRIBUTED_EVIDENCE_TARGET_RULE: &str = "call-target-from-contributed-evidence";
+
 /// The only correspondence rule the core currently derives. A contributor
 /// asserts one contributor callable identity for a callable in each of its
 /// observation contexts; when that identity appears in more than one context
@@ -739,6 +744,40 @@ impl PublishedSnapshot {
                 ));
             }
         }
+        for entity in &self.program_entities {
+            match (entity.kind, entity.source_location.as_ref()) {
+                (ProgramEntityKind::Callable, None) => {}
+                (ProgramEntityKind::Callable, Some(_)) => {
+                    return Err(format!(
+                        "callable entity '{}' carries a source location its evidence does not preserve",
+                        entity.id
+                    ));
+                }
+                (ProgramEntityKind::CallSite, None) => {
+                    return Err(format!("call site '{}' has no source location", entity.id));
+                }
+                (ProgramEntityKind::CallSite, Some(location)) => {
+                    let acquired_input =
+                        inputs_by_id
+                            .get(location.input_id.as_str())
+                            .ok_or_else(|| {
+                                format!(
+                                    "call site '{}' is located in unknown acquired input '{}'",
+                                    entity.id, location.input_id
+                                )
+                            })?;
+                    if location.artifact != acquired_input.evidence_artifact {
+                        return Err(format!(
+                            "call site '{}' location does not identify its acquired evidence artifact",
+                            entity.id
+                        ));
+                    }
+                    if location.line == 0 {
+                        return Err(format!("call site '{}' has no source line", entity.id));
+                    }
+                }
+            }
+        }
         let evidence_by_id: BTreeMap<_, _> = self
             .evidence_records
             .iter()
@@ -801,6 +840,15 @@ impl PublishedSnapshot {
                 return Err(format!(
                     "evidence '{}' location does not identify its acquired evidence artifact",
                     evidence.id
+                ));
+            }
+            if evidence.source_location.line == 0 {
+                return Err(format!("evidence '{}' has no source line", evidence.id));
+            }
+            if subject.source_location.as_ref() != Some(&evidence.source_location) {
+                return Err(format!(
+                    "evidence '{}' and call site '{}' disagree about the call-site location",
+                    evidence.id, subject.id
                 ));
             }
             for manifestation_id in &evidence.related_manifestation_ids {
@@ -959,6 +1007,14 @@ impl PublishedSnapshot {
             .collect();
         if derivations_by_claim.len() != self.derivations.len() {
             return Err("published snapshot contains duplicate claim derivations".into());
+        }
+        for derivation in &self.derivations {
+            if derivation.rule != CONTRIBUTED_EVIDENCE_TARGET_RULE {
+                return Err(format!(
+                    "derivation for claim '{}' uses unknown rule '{}'",
+                    derivation.output_claim_id, derivation.rule
+                ));
+            }
         }
         let resolutions_by_site: BTreeMap<_, _> = self
             .call_site_resolutions
@@ -1128,6 +1184,11 @@ impl PublishedSnapshot {
                     claim.id
                 ));
             }
+        }
+        if derivations_by_claim.len() != claim_ids.len() {
+            return Err(
+                "published snapshot contains derivations for claims it does not publish".into(),
+            );
         }
         for resolution in &self.call_site_resolutions {
             let target_count = self
@@ -1616,7 +1677,7 @@ pub(crate) fn publish(
                     evidence_ids: target_evidence_ids.clone(),
                 };
                 derivations.push(Derivation {
-                    rule: "call-target-from-contributed-evidence".into(),
+                    rule: CONTRIBUTED_EVIDENCE_TARGET_RULE.into(),
                     input_evidence_ids: target_evidence_ids,
                     output_claim_id: claim_id.clone(),
                 });

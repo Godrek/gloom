@@ -1,10 +1,11 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, ContributedCallKind, ContributedCallSite,
-    ContributedCallable, ContributedEvidence, ContributedInput, ContributedTargetClaim,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, ProgramEntityKind, Resolution,
+    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
+    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
+    ContributedInput, ContributedTargetClaim, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    ProgramEntityKind, Resolution,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -990,7 +991,7 @@ fn tokenized_llvm_calls_ignore_comments_newlines_and_label_placement() {
                     .line
             })
             .collect::<Vec<_>>(),
-        [4, 6, 10]
+        [4, 7, 11]
     );
     let exported: serde_json::Value =
         serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
@@ -1166,6 +1167,112 @@ fn literal_aggregate_return_types_do_not_end_the_callee_search() {
             })
             .collect::<Vec<_>>(),
         [6, 8]
+    );
+}
+
+#[test]
+fn loaded_snapshots_revalidate_derivation_rules_and_call_site_locations() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:revalidation-fixture",
+        "revalidation-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/quoted-brace-call.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    assert_eq!(
+        exported["derivations"][0]["rule"],
+        serde_json::json!(CONTRIBUTED_EVIDENCE_TARGET_RULE)
+    );
+    let load = |value: &serde_json::Value| {
+        application
+            .load_snapshot_json(&serde_json::to_string(value).unwrap())
+            .unwrap_err()
+    };
+
+    let mut renamed_rule = exported.clone();
+    renamed_rule["derivations"][0]["rule"] = serde_json::json!("same-name-means-target");
+    let error = load(&renamed_rule);
+    assert!(error.contains("unknown rule"), "unexpected error: {error}");
+
+    let mut orphan_derivation = exported.clone();
+    let mut orphan = orphan_derivation["derivations"][0].clone();
+    orphan["output_claim_id"] = serde_json::json!("claim:revalidation-fixture:orphan");
+    orphan_derivation["derivations"]
+        .as_array_mut()
+        .unwrap()
+        .push(orphan);
+    let error = load(&orphan_derivation);
+    assert!(
+        error.contains("derivations for claims it does not publish"),
+        "unexpected error: {error}"
+    );
+
+    let call_site_index = exported["program_entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|entity| entity["kind"] == serde_json::json!("call-site"))
+        .unwrap();
+    let mut zero_line_entity = exported.clone();
+    zero_line_entity["program_entities"][call_site_index]["source_location"]["line"] =
+        serde_json::json!(0);
+    let error = load(&zero_line_entity);
+    assert!(
+        error.contains("has no source line"),
+        "unexpected error: {error}"
+    );
+
+    let mut moved_entity = exported.clone();
+    moved_entity["program_entities"][call_site_index]["source_location"]["line"] =
+        serde_json::json!(999);
+    let error = load(&moved_entity);
+    assert!(
+        error.contains("disagree about the call-site location"),
+        "unexpected error: {error}"
+    );
+
+    let mut zero_line_evidence = exported.clone();
+    zero_line_evidence["evidence_records"][0]["source_location"]["line"] = serde_json::json!(0);
+    let error = load(&zero_line_evidence);
+    assert!(
+        error.contains("no source line"),
+        "unexpected error: {error}"
+    );
+
+    let callable_index = exported["program_entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|entity| entity["kind"] == serde_json::json!("callable"))
+        .unwrap();
+    let mut located_callable = exported.clone();
+    located_callable["program_entities"][callable_index]["source_location"] =
+        exported["program_entities"][call_site_index]["source_location"].clone();
+    let error = load(&located_callable);
+    assert!(
+        error.contains("carries a source location its evidence does not preserve"),
+        "unexpected error: {error}"
+    );
+
+    let mut dropped_location = exported.clone();
+    dropped_location["program_entities"][call_site_index]["source_location"] =
+        serde_json::Value::Null;
+    let error = load(&dropped_location);
+    assert!(
+        error.contains("has no source location"),
+        "unexpected error: {error}"
     );
 }
 

@@ -231,27 +231,6 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
                     index += 1;
                 }
             }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                let start_line = line;
-                index += 2;
-                let mut closed = false;
-                while index < bytes.len() {
-                    if bytes[index] == b'\n' {
-                        line += 1;
-                    }
-                    if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                        index += 2;
-                        closed = true;
-                        break;
-                    }
-                    index += 1;
-                }
-                if !closed {
-                    return Err(format!(
-                        "unterminated LLVM block comment at line {start_line}"
-                    ));
-                }
-            }
             b'@' | b'%' => {
                 let token_line = line;
                 let global = bytes[index] == b'@';
