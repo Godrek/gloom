@@ -7,16 +7,20 @@ mod snapshot;
 mod viewer;
 
 pub use contributor::{
-    ContributedCallable, ContributedDirectCall, ContributedInput, ContributorIdentity,
+    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
+    ContributedInput, ContributedTargetClaim, ContributorIdentity,
     EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
     EvidenceContributor,
 };
 pub use llvm::LlvmTextContributor;
 pub use model::{AnalysisSummary, Document, Edge, Metadata, Node};
 pub use snapshot::{
-    AcquiredInput, AcquiredInputId, CallGraphProjection, CallRelationship, Derivation, EvidenceId,
-    EvidenceRecord, Explanation, ExplanationHandle, Manifestation, ManifestationId,
-    NamedQueryResult, ObservationContext, ObservationContextId, ProgramEntity, ProgramEntityId,
-    ProgramEntityKind, ProgramSnapshot, ProgramSnapshotId, PublishedSnapshot, Resolution,
-    SNAPSHOT_SCHEMA_VERSION, SourceLocation, TargetClaim, TargetClaimId,
+    AcquiredInput, AcquiredInputId, CONTRIBUTED_EVIDENCE_TARGET_RULE,
+    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CallGraphProjection, CallRelationship,
+    CallSiteResolution, CorrespondenceClaim, CorrespondenceClaimId, Derivation, EvidenceId,
+    EvidenceRecord, EvidenceScope, EvidenceSupport, Explanation, ExplanationHandle, Manifestation,
+    ManifestationId, NamedQueryResult, ObservationContext, ObservationContextId, ProgramEntity,
+    ProgramEntityId, ProgramEntityKind, ProgramSnapshot, ProgramSnapshotId, ProjectedCallSite,
+    ProjectedCallTarget, PublishedSnapshot, Resolution, SNAPSHOT_SCHEMA_VERSION, SourceLocation,
+    TargetClaim, TargetClaimId,
 };

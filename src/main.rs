@@ -74,6 +74,8 @@ enum Commands {
         snapshot: PathBuf,
         #[arg(long, conflicts_with = "explain", required_unless_present = "explain")]
         callees: Option<String>,
+        #[arg(long, requires = "callees", conflicts_with = "explain")]
+        caller_entity_id: Option<String>,
         #[arg(long, conflicts_with = "callees", required_unless_present = "callees")]
         explain: Option<String>,
     },
@@ -179,31 +181,46 @@ fn run() -> Result<(), String> {
                 write(&path, &application.render_snapshot_viewer(&snapshot)?)?;
             }
             println!(
-                "Published {} entities and {} call relationships to {}",
+                "Published {} entities and {} call sites to {}",
                 snapshot.program_entities().len(),
-                snapshot.call_graph_projection().relationships.len(),
+                snapshot.call_graph_projection().call_sites.len(),
                 output.display()
             );
         }
         Commands::QuerySnapshot {
             snapshot,
             callees,
+            caller_entity_id,
             explain,
         } => {
             let published = application
                 .load_snapshot_json(&read(&snapshot)?)
                 .map_err(|error| format!("{}: {error}", snapshot.display()))?;
             let value = if let Some(caller_name) = callees {
-                serde_json::to_value(
-                    application.query_snapshot(&published, NamedQuery::Callees { caller_name })?,
-                )
+                let caller_entity_id = caller_entity_id
+                    .map(|requested_id| {
+                        published
+                            .program_entities()
+                            .iter()
+                            .find(|entity| entity.id.as_str() == requested_id)
+                            .map(|entity| entity.id.clone())
+                            .ok_or_else(|| format!("unknown caller entity '{requested_id}'"))
+                    })
+                    .transpose()?;
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::Callees {
+                        caller_name,
+                        caller_entity_id,
+                    },
+                )?)
             } else if let Some(handle) = explain {
                 let explanation_handle = published
                     .call_graph_projection()
-                    .relationships
+                    .call_sites
                     .iter()
-                    .find(|relationship| relationship.explanation_handle.as_str() == handle)
-                    .map(|relationship| &relationship.explanation_handle)
+                    .find(|call_site| call_site.explanation_handle.as_str() == handle)
+                    .map(|call_site| &call_site.explanation_handle)
                     .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
                 serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
             } else {
