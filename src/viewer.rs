@@ -1,5 +1,5 @@
 use crate::model::Document;
-use crate::snapshot::{CallRelationship, Explanation, ProgramSnapshot, PublishedSnapshot};
+use crate::snapshot::{Explanation, ProgramSnapshot, ProjectedCallSite, PublishedSnapshot};
 use serde::Serialize;
 
 pub fn render_html(document: &Document) -> Result<String, String> {
@@ -10,32 +10,34 @@ pub fn render_html(document: &Document) -> Result<String, String> {
 }
 
 #[derive(Serialize)]
-struct SnapshotViewerRelationship<'a> {
-    relationship: &'a CallRelationship,
+struct SnapshotViewerCallSite<'a> {
+    call_site: &'a ProjectedCallSite,
+    target_set_incomplete: bool,
     explanation: Explanation,
 }
 
 #[derive(Serialize)]
 struct SnapshotViewerData<'a> {
     program_snapshot: &'a ProgramSnapshot,
-    relationships: Vec<SnapshotViewerRelationship<'a>>,
+    call_sites: Vec<SnapshotViewerCallSite<'a>>,
 }
 
 pub fn render_snapshot_html(snapshot: &PublishedSnapshot) -> Result<String, String> {
-    let relationships = snapshot
+    let call_sites = snapshot
         .call_graph_projection()
-        .relationships
+        .call_sites
         .iter()
-        .map(|relationship| {
-            Ok(SnapshotViewerRelationship {
-                relationship,
-                explanation: snapshot.explain(&relationship.explanation_handle)?,
+        .map(|call_site| {
+            Ok(SnapshotViewerCallSite {
+                call_site,
+                target_set_incomplete: call_site.resolution.target_set_incomplete(),
+                explanation: snapshot.explain(&call_site.explanation_handle)?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let data = serde_json::to_string(&SnapshotViewerData {
         program_snapshot: snapshot.program_snapshot(),
-        relationships,
+        call_sites,
     })
     .map_err(|error| error.to_string())?
     .replace("</", "<\\/");

@@ -19,16 +19,21 @@ validates only a small part of that direction.
 - Export schema 1.0 JSON.
 - Generate a self-contained HTML viewer with search, pan, zoom, drag, cycle
   highlighting, and caller/callee inspection.
-- Publish an evidence-backed snapshot for direct LLVM calls, query its named
-  callees, and expand compact explanation handles into evidence and derivations.
+- Publish evidence-backed snapshots with first-class direct and indirect call
+  sites, per-site complete/partial/absent resolution, and possible targets.
+- Query named callees without dropping unresolved sites, and expand compact
+  call-site explanation handles into evidence, target derivations, and
+  cross-context correspondence claims.
 
 ## Prototype limitations
 
-The current model uses LLVM symbol names as identities, merges all unresolved
-indirect calls into one placeholder, and treats all stored edges alike during
-traversal. Its `call_count` is a count of merged static occurrences, not runtime
-invocations. Its zero-incoming function query is not a semantic entry-point
-analysis.
+The legacy schema 1.0 model uses LLVM symbol names as identities, merges all
+unresolved indirect calls into one placeholder, and treats all stored edges
+alike during traversal. The evidence-backed snapshot path preserves indirect
+call sites independently, but broader identity and query migration remains in
+progress. The legacy `call_count` is a count of merged static occurrences, not
+runtime invocations. Its zero-incoming function query is not a semantic
+entry-point analysis.
 
 Schema 1.0, the CLI, and the Rust library API are pre-stable prototype
 interfaces. They may change as the evidence and identity model is implemented;
@@ -86,10 +91,15 @@ handle without rerunning extraction or reconstructing the relationship:
 
 ```bash
 gloom query-snapshot snapshot.json --callees caller
+gloom query-snapshot snapshot.json --callees caller \
+  --caller-entity-id entity:direct-call-example-v1:input:0:callable:0
 gloom query-snapshot snapshot.json --explain \
-  explanation:claim:direct-call-example-v1:input:0:direct-target:0
+  explanation:entity:direct-call-example-v1:input:0:call-site:0
 gloom view-snapshot snapshot.json -o snapshot.html
 ```
+
+Name-only callee queries reject ambiguous callable labels. Use the entity ID
+reported in the snapshot to select one caller explicitly.
 
 The published snapshot format is currently `2.0-pre`. The existing `build`,
 `analyze`, and `view` commands continue to use the legacy schema 1.0 path during

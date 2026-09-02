@@ -1,5 +1,7 @@
 use gloom::app::{Application, NamedQuery};
-use gloom::{LlvmTextContributor, ObservationContext, ProgramEntityKind};
+use gloom::{
+    EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -72,13 +74,35 @@ fn explains_one_direct_call_from_evidence_to_projection() {
     );
 
     let claim = snapshot.target_claims().first().unwrap();
-    let evidence = snapshot.evidence_records().first().unwrap();
+    let target_evidence = snapshot
+        .evidence_records()
+        .iter()
+        .find(|evidence| claim.evidence_ids.contains(&evidence.id))
+        .unwrap();
+    let call_site_resolution = snapshot.call_site_resolutions().first().unwrap();
+    let resolution_evidence = snapshot
+        .evidence_records()
+        .iter()
+        .find(|evidence| call_site_resolution.evidence_ids.contains(&evidence.id))
+        .unwrap();
     assert_eq!(claim.call_site_id, call_site.id);
     assert_eq!(claim.target_manifestation_id, callee_manifestation.id);
-    assert_eq!(claim.evidence_ids, std::slice::from_ref(&evidence.id));
+    assert_eq!(
+        claim.evidence_ids,
+        std::slice::from_ref(&target_evidence.id)
+    );
+    assert_eq!(target_evidence.evidence_type, "static-direct-call");
+    assert_eq!(resolution_evidence.evidence_type, "static-call-site");
+    assert_eq!(target_evidence.scope, EvidenceScope::Static);
+    assert_eq!(target_evidence.support, EvidenceSupport::TargetClaim);
+    assert_eq!(resolution_evidence.scope, EvidenceScope::Static);
+    assert_eq!(
+        resolution_evidence.support,
+        EvidenceSupport::CallSiteResolution
+    );
     assert_eq!(
         claim.observation_context_id,
-        evidence.observation_context_id
+        target_evidence.observation_context_id
     );
 
     let observation = snapshot.observation_contexts().first().unwrap();
@@ -100,6 +124,7 @@ fn explains_one_direct_call_from_evidence_to_projection() {
             &snapshot,
             NamedQuery::Callees {
                 caller_name: "caller".into(),
+                caller_entity_id: None,
             },
         )
         .unwrap();
@@ -109,19 +134,27 @@ fn explains_one_direct_call_from_evidence_to_projection() {
     assert_eq!(relationship.caller_entity_id, caller.id);
     assert_eq!(relationship.callee_entity_id, callee.id);
     assert_eq!(relationship.call_site_id, call_site.id);
+    assert_eq!(relationship.target_claim_id, claim.id);
     assert!(!relationship.explanation_handle.as_str().is_empty());
     let compact_result = serde_json::to_string(&result).unwrap();
-    assert!(!compact_result.contains(evidence.id.as_str()));
+    assert!(!compact_result.contains(target_evidence.id.as_str()));
+    assert!(!compact_result.contains(resolution_evidence.id.as_str()));
     assert!(!compact_result.contains("derivation"));
 
     let explanation = application
         .explain_snapshot(&snapshot, &relationship.explanation_handle)
         .unwrap();
-    assert_eq!(explanation.target_claim.id, claim.id);
-    assert_eq!(explanation.evidence_records, std::slice::from_ref(evidence));
-    assert_eq!(explanation.derivation.output_claim_id, claim.id);
     assert_eq!(
-        explanation.derivation.input_evidence_ids,
+        explanation.call_site_resolution.resolution,
+        gloom::Resolution::Complete
+    );
+    assert_eq!(explanation.target_claims, std::slice::from_ref(claim));
+    assert_eq!(explanation.evidence_records.len(), 2);
+    assert!(explanation.evidence_records.contains(target_evidence));
+    assert!(explanation.evidence_records.contains(resolution_evidence));
+    assert_eq!(explanation.derivations[0].output_claim_id, claim.id);
+    assert_eq!(
+        explanation.derivations[0].input_evidence_ids,
         claim.evidence_ids
     );
 
@@ -150,13 +183,27 @@ fn explains_one_direct_call_from_evidence_to_projection() {
         .unwrap_err();
     assert!(error.contains("duplicate target-claim identities"));
 
+    let mut invalid_resolution_support = exported.clone();
+    invalid_resolution_support["evidence_records"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|evidence| evidence["id"] == serde_json::json!(resolution_evidence.id))
+        .unwrap()["support"] = serde_json::json!("target-claim");
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&invalid_resolution_support).unwrap())
+        .unwrap_err();
+    assert!(error.contains("support semantics"));
+
     let html = application.render_snapshot_viewer(&snapshot).unwrap();
-    assert!(html.contains(&serde_json::to_string(relationship).unwrap()));
+    assert!(html.contains(
+        &serde_json::to_string(&snapshot.call_graph_projection().call_sites[0]).unwrap()
+    ));
     assert!(html.contains("<button type=\"button\" class=\"summary\" aria-expanded=\"false\">"));
     assert!(html.contains("caller"));
     assert!(html.contains("callee"));
     assert!(html.contains(relationship.explanation_handle.as_str()));
-    assert!(html.contains(evidence.id.as_str()));
+    assert!(html.contains(target_evidence.id.as_str()));
 
     let legacy = application
         .build(&[PathBuf::from("tests/fixtures/simple.ll")], "clang", &[])

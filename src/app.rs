@@ -3,7 +3,8 @@ use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
 use crate::snapshot::{
-    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, PublishedSnapshot,
+    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, ProgramEntityId,
+    PublishedSnapshot,
 };
 use crate::viewer;
 use serde::Serialize;
@@ -22,7 +23,10 @@ pub enum Query {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NamedQuery {
-    Callees { caller_name: String },
+    Callees {
+        caller_name: String,
+        caller_entity_id: Option<ProgramEntityId>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -44,7 +48,7 @@ impl Application {
         let identity = contributor.identity();
         let contributions = inputs
             .iter()
-            .map(|input| contributor.contribute(input))
+            .map(|input| contributor.contribute(input, &context))
             .collect::<Result<Vec<_>, _>>()?;
         crate::snapshot::publish(contributions, identity, context)
     }
@@ -55,7 +59,10 @@ impl Application {
         query: NamedQuery,
     ) -> Result<NamedQueryResult, String> {
         match query {
-            NamedQuery::Callees { caller_name } => snapshot.query_callees(&caller_name),
+            NamedQuery::Callees {
+                caller_name,
+                caller_entity_id,
+            } => snapshot.query_callees(&caller_name, caller_entity_id.as_ref()),
         }
     }
 

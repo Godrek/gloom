@@ -1,10 +1,11 @@
 use crate::contributor::{
-    ContributedCallable, ContributedDirectCall, ContributedInput, ContributorIdentity,
+    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
+    ContributedInput, ContributedTargetClaim, ContributorIdentity,
     EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
     EvidenceContributor, fingerprint_parts,
 };
 use crate::model::{Graph, Node};
-use regex::Regex;
+use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -68,6 +69,7 @@ impl LlvmTextContributor {
             capabilities: vec![
                 EvidenceCapability::CallableManifestations,
                 EvidenceCapability::DirectCallEvidence,
+                EvidenceCapability::IndirectCallEvidence,
             ],
         }
     }
@@ -78,7 +80,11 @@ impl EvidenceContributor for LlvmTextContributor {
         LlvmTextContributor::identity(self)
     }
 
-    fn contribute(&self, input: &Path) -> Result<EvidenceContribution, String> {
+    fn contribute(
+        &self,
+        input: &Path,
+        context: &ObservationContext,
+    ) -> Result<EvidenceContribution, String> {
         let acquired = acquire_llvm_ir(input, &self.clang, &self.clang_flags)?;
         let observations = observe_llvm_ir(&acquired.text)?;
         let content_fingerprint = fingerprint_parts(&[&acquired.text]);
@@ -93,29 +99,58 @@ impl EvidenceContributor for LlvmTextContributor {
                 },
                 content_fingerprint,
             },
+            observation_contexts: vec![context.clone()],
             callables: observations
                 .functions
                 .into_iter()
                 .map(|function| ContributedCallable {
+                    contributor_callable_id: function.name.clone(),
                     display_name: function.name,
                     defined: function.defined,
                     representation: "llvm-function".into(),
+                    observation_context_id: context.id.clone(),
                 })
                 .collect(),
-            direct_calls: observations
+            call_sites: observations
                 .calls
                 .into_iter()
-                .filter_map(|call| match call.target {
-                    ObservedCallTarget::Direct(callee_display_name) => {
-                        Some(ContributedDirectCall {
-                            caller_display_name: call.caller,
+                .map(|call| match call.target {
+                    ObservedCallTarget::Direct(callee_display_name) => ContributedCallSite {
+                        kind: ContributedCallKind::Direct,
+                        caller_callable_id: call.caller,
+                        line: call.line,
+                        observation_context_id: context.id.clone(),
+                        resolution: Resolution::Complete,
+                        evidence: ContributedEvidence {
+                            evidence_type: "static-call-site".into(),
+                            scope: EvidenceScope::Static,
+                            support: EvidenceSupport::CallSiteResolution,
+                        },
+                        target_claims: vec![ContributedTargetClaim {
+                            target_callable_id: callee_display_name.clone(),
                             callee_display_name,
                             target_representation: "llvm-function".into(),
-                            line: call.line,
-                            evidence_type: "static-direct-call".into(),
-                        })
-                    }
-                    ObservedCallTarget::Indirect => None,
+                            observation_context_id: context.id.clone(),
+                            evidence: vec![ContributedEvidence {
+                                evidence_type: "static-direct-call".into(),
+                                scope: EvidenceScope::Static,
+                                support: EvidenceSupport::TargetClaim,
+                            }],
+                        }],
+                    },
+                    ObservedCallTarget::Indirect => ContributedCallSite {
+                        kind: ContributedCallKind::Indirect,
+                        caller_callable_id: call.caller,
+                        line: call.line,
+                        observation_context_id: context.id.clone(),
+                        resolution: Resolution::Absent,
+                        evidence: ContributedEvidence {
+                            evidence_type: "static-indirect-call".into(),
+                            scope: EvidenceScope::Static,
+                            support: EvidenceSupport::CallSiteResolution,
+                        },
+                        target_claims: Vec::new(),
+                    },
                 })
                 .collect(),
         })
@@ -131,64 +166,382 @@ fn evidence_artifact(path: &Path, kind: &AcquiredInputKind, fingerprint: &str) -
     }
 }
 
-fn captured_name(captures: &regex::Captures<'_>, first: usize) -> String {
-    captures
-        .get(first)
-        .or_else(|| captures.get(first + 1))
-        .unwrap()
-        .as_str()
-        .to_owned()
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LlvmTokenKind {
+    Word(String),
+    Global(String),
+    Local,
+    Metadata,
+    StringLiteral,
+    LeftBrace,
+    RightBrace,
+    LeftParenthesis,
+    RightParenthesis,
+    Colon,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LlvmToken {
+    kind: LlvmTokenKind,
+    line: usize,
+}
+
+fn llvm_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'$' | b'.' | b'_')
+}
+
+fn quoted_token_end(bytes: &[u8], start: usize, line: &mut usize) -> Result<usize, String> {
+    let start_line = *line;
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if index + 1 < bytes.len() => {
+                if bytes[index + 1] == b'\n' {
+                    *line += 1;
+                }
+                index += 2;
+            }
+            b'"' => return Ok(index + 1),
+            b'\n' => {
+                *line += 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    Err(format!(
+        "unterminated LLVM quoted token at line {start_line}"
+    ))
+}
+
+fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    let mut line = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\r' => index += 1,
+            b'\n' => {
+                line += 1;
+                index += 1;
+            }
+            b';' => {
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let start_line = line;
+                index += 2;
+                let mut closed = false;
+                while index < bytes.len() {
+                    if bytes[index] == b'\n' {
+                        line += 1;
+                    }
+                    if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        index += 2;
+                        closed = true;
+                        break;
+                    }
+                    index += 1;
+                }
+                if !closed {
+                    return Err(format!(
+                        "unterminated LLVM block comment at line {start_line}"
+                    ));
+                }
+            }
+            b'@' | b'%' => {
+                let token_line = line;
+                let global = bytes[index] == b'@';
+                index += 1;
+                let name = if bytes.get(index) == Some(&b'"') {
+                    let end = quoted_token_end(bytes, index, &mut line)?;
+                    let name = String::from_utf8_lossy(&bytes[index + 1..end - 1]).into_owned();
+                    index = end;
+                    name
+                } else {
+                    let start = index;
+                    while index < bytes.len() && llvm_name_byte(bytes[index]) {
+                        index += 1;
+                    }
+                    String::from_utf8_lossy(&bytes[start..index]).into_owned()
+                };
+                tokens.push(LlvmToken {
+                    kind: if global {
+                        LlvmTokenKind::Global(name)
+                    } else {
+                        LlvmTokenKind::Local
+                    },
+                    line: token_line,
+                });
+            }
+            b'!' => {
+                let token_line = line;
+                index += 1;
+                if bytes.get(index) == Some(&b'"') {
+                    index = quoted_token_end(bytes, index, &mut line)?;
+                } else {
+                    while index < bytes.len() && llvm_name_byte(bytes[index]) {
+                        index += 1;
+                    }
+                }
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::Metadata,
+                    line: token_line,
+                });
+            }
+            b'"' => {
+                let token_line = line;
+                index = quoted_token_end(bytes, index, &mut line)?;
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::StringLiteral,
+                    line: token_line,
+                });
+            }
+            b'{' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::LeftBrace,
+                    line,
+                });
+                index += 1;
+            }
+            b'}' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::RightBrace,
+                    line,
+                });
+                index += 1;
+            }
+            b'(' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::LeftParenthesis,
+                    line,
+                });
+                index += 1;
+            }
+            b')' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::RightParenthesis,
+                    line,
+                });
+                index += 1;
+            }
+            b':' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::Colon,
+                    line,
+                });
+                index += 1;
+            }
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'$' | b'.' | b'_') => {
+                let start = index;
+                while index < bytes.len() && llvm_name_byte(bytes[index]) {
+                    index += 1;
+                }
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::Word(
+                        String::from_utf8_lossy(&bytes[start..index]).into_owned(),
+                    ),
+                    line,
+                });
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(tokens)
+}
+
+fn call_target(tokens: &[LlvmToken], call_index: usize) -> Option<ObservedCallTarget> {
+    let mut index = call_index + 1;
+    while index < tokens.len() {
+        match &tokens[index].kind {
+            LlvmTokenKind::Word(word) if word == "asm" => return None,
+            LlvmTokenKind::Global(name)
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis) =>
+            {
+                return Some(ObservedCallTarget::Direct(name.clone()));
+            }
+            LlvmTokenKind::Local
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis) =>
+            {
+                return Some(ObservedCallTarget::Indirect);
+            }
+            LlvmTokenKind::RightBrace => break,
+            LlvmTokenKind::Word(word) if word == "call" || word == "invoke" => break,
+            _ => index += 1,
+        }
+    }
+    Some(ObservedCallTarget::Indirect)
+}
+
+fn function_signature_end(tokens: &[LlvmToken], name_index: usize) -> Option<usize> {
+    let start = (name_index + 1..tokens.len())
+        .find(|index| tokens[*index].kind == LlvmTokenKind::LeftParenthesis)?;
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match &token.kind {
+            LlvmTokenKind::LeftParenthesis => depth += 1,
+            LlvmTokenKind::RightParenthesis => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn matching_right_brace(tokens: &[LlvmToken], start: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match &token.kind {
+            LlvmTokenKind::LeftBrace => depth += 1,
+            LlvmTokenKind::RightBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn brace_group_is_function_body(tokens: &[LlvmToken], start: usize, end: usize) -> bool {
+    let mut depth = 1_usize;
+    for index in start + 1..end {
+        match &tokens[index].kind {
+            LlvmTokenKind::LeftBrace => depth += 1,
+            LlvmTokenKind::RightBrace => depth -= 1,
+            LlvmTokenKind::Word(word)
+                if depth == 1
+                    && matches!(
+                        word.as_str(),
+                        "ret"
+                            | "br"
+                            | "switch"
+                            | "indirectbr"
+                            | "invoke"
+                            | "callbr"
+                            | "resume"
+                            | "catchswitch"
+                            | "catchret"
+                            | "cleanupret"
+                            | "unreachable"
+                    )
+                    && !tokens
+                        .get(index + 1)
+                        .is_some_and(|token| token.kind == LlvmTokenKind::Colon) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn function_body_bounds(
+    tokens: &[LlvmToken],
+    signature_end: usize,
+    name: &str,
+) -> Result<(usize, usize), String> {
+    let mut index = signature_end + 1;
+    while index < tokens.len() {
+        if tokens[index].kind == LlvmTokenKind::LeftBrace {
+            let end = matching_right_brace(tokens, index)
+                .ok_or_else(|| format!("LLVM function '{name}' has an incomplete braced value"))?;
+            if brace_group_is_function_body(tokens, index, end) {
+                return Ok((index, end));
+            }
+            index = end + 1;
+            continue;
+        }
+        if matches!(&tokens[index].kind, LlvmTokenKind::Word(word) if word == "define" || word == "declare")
+        {
+            break;
+        }
+        index += 1;
+    }
+    Err(format!("LLVM function '{name}' has no body"))
+}
+
+fn is_call_opcode(tokens: &[LlvmToken], index: usize) -> bool {
+    matches!(&tokens[index].kind, LlvmTokenKind::Word(word) if word == "call" || word == "invoke")
+        && !tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == LlvmTokenKind::Colon)
 }
 
 fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
-    let symbol = r#"@(?:\"((?:[^\"\\]|\\.)+)\"|([-a-zA-Z$._0-9]+))"#;
-    let function = Regex::new(&format!(r"^\s*(define|declare)\b.*?{symbol}\s*\("))
-        .map_err(|e| e.to_string())?;
-    let call = Regex::new(&format!(r"\b(?:call|invoke)\b[^@\n]*?{symbol}\s*\("))
-        .map_err(|e| e.to_string())?;
-    let any_call = Regex::new(r"\b(?:call|invoke)\b").map_err(|e| e.to_string())?;
+    let tokens = tokenize_llvm_ir(text)?;
     let mut observations = LlvmObservations::default();
-    let mut current: Option<String> = None;
-    let mut brace_depth: isize = 0;
-
-    for (line_index, line) in text.lines().enumerate() {
-        if let Some(found) = function.captures(line) {
-            let name = captured_name(&found, 2);
-            let defined = &found[1] == "define";
+    let mut current = None;
+    let mut body_end = 0_usize;
+    let mut index = 0;
+    while index < tokens.len() {
+        if current.is_none() {
+            let defined = match &tokens[index].kind {
+                LlvmTokenKind::Word(word) if word == "define" => true,
+                LlvmTokenKind::Word(word) if word == "declare" => false,
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            };
+            let name_index = (index + 1..tokens.len())
+                .find(|candidate| matches!(&tokens[*candidate].kind, LlvmTokenKind::Global(_)))
+                .ok_or_else(|| {
+                    format!(
+                        "LLVM function declaration at line {} has no global identity",
+                        tokens[index].line
+                    )
+                })?;
+            let LlvmTokenKind::Global(name) = &tokens[name_index].kind else {
+                unreachable!()
+            };
             observations.functions.push(ObservedFunction {
                 name: name.clone(),
                 defined,
             });
-            if defined {
-                current = Some(name);
-                brace_depth =
-                    line.matches('{').count() as isize - line.matches('}').count() as isize;
+            let signature_end = function_signature_end(&tokens, name_index).ok_or_else(|| {
+                format!("LLVM function '{name}' has an incomplete parameter list")
+            })?;
+            if !defined {
+                index = signature_end + 1;
+                continue;
             }
+            let (body_index, end) = function_body_bounds(&tokens, signature_end, name)?;
+            current = Some(name.clone());
+            body_end = end;
+            index = body_index + 1;
             continue;
         }
-        let Some(caller) = current.as_deref() else {
-            continue;
-        };
-        brace_depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
-        if let Some(found) = call.captures(line) {
-            let callee = captured_name(&found, 1);
-            if !callee.starts_with("llvm.") {
-                observations.calls.push(ObservedCall {
-                    caller: caller.to_owned(),
-                    target: ObservedCallTarget::Direct(callee),
-                    line: line_index + 1,
-                });
-            }
-        } else if any_call.is_match(line) && !line.contains(" asm ") {
-            observations.calls.push(ObservedCall {
-                caller: caller.to_owned(),
-                target: ObservedCallTarget::Indirect,
-                line: line_index + 1,
-            });
-        }
-        if brace_depth <= 0 && line.contains('}') {
+
+        if index == body_end {
             current = None;
+        } else if is_call_opcode(&tokens, index) {
+            if let Some(target) = call_target(&tokens[..body_end], index) {
+                if !matches!(&target, ObservedCallTarget::Direct(name) if name.starts_with("llvm."))
+                {
+                    observations.calls.push(ObservedCall {
+                        caller: current.clone().expect("function body must have a caller"),
+                        target,
+                        line: tokens[index].line,
+                    });
+                }
+            }
         }
+        index += 1;
     }
     Ok(observations)
 }
