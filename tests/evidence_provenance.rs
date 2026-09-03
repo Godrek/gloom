@@ -2,22 +2,24 @@ use gloom::app::{Application, NamedQuery};
 use gloom::{
     ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
     ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedResolutionRevision,
-    ContributedTargetClaim, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
-    EvidenceCapability, EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
     ObservationContext, ObservationContextId, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const STATIC_INPUT: &str = "static-analysis.fixture";
-const OTHER_STATIC_INPUT: &str = "other-static-analysis.fixture";
 const TRACE_INPUT: &str = "runtime-trace.fixture";
-const REFINEMENT_INPUT: &str = "whole-program-refinement.fixture";
+const STATIC_FINGERPRINT: &str = "fixture:static-analysis";
+const TRACE_FINGERPRINT: &str = "fixture:runtime-trace";
 const CALL_SITE_IDENTITY: &str = "dispatch#0";
 const CALL_SITE_LINE: usize = 7;
 const TRACE_LINE: usize = 42;
-const REFINEMENT_LINE: usize = 3;
+const FIRST_LLVM_INPUT: &str = "tests/fixtures/single-call-first.ll";
+const SECOND_LLVM_INPUT: &str = "tests/fixtures/single-call-second.ll";
 
 fn publication_context(contributor: &str) -> ObservationContext {
     ObservationContext::static_analysis(
@@ -51,6 +53,7 @@ fn identity(name: &str) -> ContributorIdentity {
         contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
         capabilities: vec![
             EvidenceCapability::CallableManifestations,
+            EvidenceCapability::DirectCallEvidence,
             EvidenceCapability::IndirectCallEvidence,
         ],
     }
@@ -103,30 +106,33 @@ fn target_claim(
     }
 }
 
-fn contributed_input(input: &Path, acquisition_method: &str) -> ContributedInput {
+fn contributed_input(
+    input: &Path,
+    acquisition_method: &str,
+    content_fingerprint: &str,
+) -> ContributedInput {
     ContributedInput {
         path: input.display().to_string(),
         evidence_artifact: input.display().to_string(),
         media_type: "application/x-gloom-fixture".into(),
         acquisition_method: acquisition_method.into(),
-        content_fingerprint: format!("fixture:{}", input.display()),
+        content_fingerprint: content_fingerprint.into(),
     }
 }
 
 /// One statically observed indirect call site with one statically possible
-/// target. Both acquired inputs of the ambiguity fixture use it, so the same
-/// contributor call-site identity is published twice.
+/// target.
 fn static_contribution(input: &Path, context: &ObservationContext) -> EvidenceContribution {
     let artifact = input.display().to_string();
     EvidenceContribution {
-        input: contributed_input(input, "semantic-fixture"),
+        input: contributed_input(input, "semantic-fixture", STATIC_FINGERPRINT),
         observation_contexts: vec![context.clone()],
         callables: vec![
             callable("dispatch", "fixture-callable", &context.id),
             callable("first_target", "fixture-callable", &context.id),
         ],
         call_sites: vec![ContributedCallSite {
-            contributor_call_site_id: CALL_SITE_IDENTITY.into(),
+            contributor_call_site_id: ContributorCallSiteId::new(CALL_SITE_IDENTITY).unwrap(),
             kind: ContributedCallKind::Indirect,
             caller_callable_id: "dispatch".into(),
             line: CALL_SITE_LINE,
@@ -162,12 +168,12 @@ enum TraceAttachment {
     Attached,
     /// The trace names a call-site identity nobody contributed.
     UnknownCallSiteIdentity,
+    /// The trace names a real call-site identity but the wrong acquired input.
+    UnknownAcquiredInput,
     /// The trace names a real call-site identity but the wrong caller.
     MismatchedCaller,
     /// The trace cites provenance in an artifact it never acquired.
     ForeignArtifactProvenance,
-    /// The trace tries to revise a static target-set resolution.
-    RuntimeResolutionRevision,
 }
 
 struct StaticAndTraceFixture {
@@ -189,7 +195,7 @@ impl StaticAndTraceFixture {
             _ => artifact.clone(),
         };
         EvidenceContribution {
-            input: contributed_input(input, "runtime-trace"),
+            input: contributed_input(input, "runtime-trace", TRACE_FINGERPRINT),
             observation_contexts: vec![context.clone(), runtime.clone()],
             callables: vec![
                 callable("first_target", "traced-callable", &runtime.id),
@@ -199,29 +205,20 @@ impl StaticAndTraceFixture {
             call_site_attachments: vec![ContributedCallSiteAttachment {
                 call_site: ContributedCallSiteReference {
                     observation_context_id: context.id.clone(),
+                    acquired_input_fingerprint: match self.attachment {
+                        TraceAttachment::UnknownAcquiredInput => "fixture:never-acquired".into(),
+                        _ => STATIC_FINGERPRINT.into(),
+                    },
                     caller_callable_id: match self.attachment {
                         TraceAttachment::MismatchedCaller => "first_target".into(),
                         _ => "dispatch".into(),
                     },
                     contributor_call_site_id: match self.attachment {
-                        TraceAttachment::UnknownCallSiteIdentity => "dispatch#9".into(),
-                        _ => CALL_SITE_IDENTITY.into(),
+                        TraceAttachment::UnknownCallSiteIdentity => {
+                            ContributorCallSiteId::new("dispatch#9").unwrap()
+                        }
+                        _ => ContributorCallSiteId::new(CALL_SITE_IDENTITY).unwrap(),
                     },
-                },
-                resolution_revision: match self.attachment {
-                    TraceAttachment::RuntimeResolutionRevision => {
-                        Some(ContributedResolutionRevision {
-                            resolution: Resolution::Complete,
-                            evidence: evidence(
-                                "runtime-observed-target-set",
-                                EvidenceScope::Runtime,
-                                EvidenceSupport::CallSiteResolution,
-                                &artifact,
-                                TRACE_LINE,
-                            ),
-                        })
-                    }
-                    _ => None,
                 },
                 target_claims: vec![
                     target_claim(
@@ -272,15 +269,35 @@ impl EvidenceContributor for StaticAndTraceFixture {
     }
 }
 
-/// A second static acquired input whose whole-program reasoning adds a target
-/// to the published call site and declares its target set complete.
-struct WholeProgramRefinementFixture;
-
-impl WholeProgramRefinementFixture {
-    const NAME: &'static str = "fixture.whole-program-refinement";
+/// Two textual LLVM IR inputs plus a trace. The LLVM contributor names call
+/// sites per artifact, so both `.ll` inputs publish `llvm-call:0`; the trace
+/// picks one by the acquired input's content fingerprint.
+struct LlvmAndTraceFixture {
+    fingerprints: RefCell<BTreeMap<String, String>>,
+    attach_to: &'static str,
+    caller_callable_id: &'static str,
+    unknown_acquired_input: bool,
 }
 
-impl EvidenceContributor for WholeProgramRefinementFixture {
+impl LlvmAndTraceFixture {
+    const NAME: &'static str = "fixture.llvm-and-trace";
+
+    fn new(attach_to: &'static str, caller_callable_id: &'static str) -> Self {
+        Self {
+            fingerprints: RefCell::new(BTreeMap::new()),
+            attach_to,
+            caller_callable_id,
+            unknown_acquired_input: false,
+        }
+    }
+
+    fn with_unknown_acquired_input(mut self) -> Self {
+        self.unknown_acquired_input = true;
+        self
+    }
+}
+
+impl EvidenceContributor for LlvmAndTraceFixture {
     fn identity(&self) -> ContributorIdentity {
         identity(Self::NAME)
     }
@@ -290,74 +307,53 @@ impl EvidenceContributor for WholeProgramRefinementFixture {
         input: &Path,
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
-        if !input.ends_with(REFINEMENT_INPUT) {
-            return Ok(static_contribution(input, context));
+        if !input.ends_with(TRACE_INPUT) {
+            let contribution = LlvmTextContributor::new("clang", &[]).contribute(input, context)?;
+            // A contributor that later acquires a trace knows which artifact
+            // the trace belongs to by the fingerprint it computed for it.
+            self.fingerprints.borrow_mut().insert(
+                input.display().to_string(),
+                contribution.input.content_fingerprint.clone(),
+            );
+            return Ok(contribution);
         }
         let artifact = input.display().to_string();
+        let runtime = runtime_context(context);
+        let acquired_input_fingerprint = if self.unknown_acquired_input {
+            "fnv1a64:0000000000000000".to_string()
+        } else {
+            self.fingerprints
+                .borrow()
+                .get(self.attach_to)
+                .cloned()
+                .expect("the attached artifact must be acquired before the trace")
+        };
         Ok(EvidenceContribution {
-            input: contributed_input(input, "semantic-fixture"),
-            observation_contexts: vec![context.clone()],
-            callables: vec![callable("second_target", "refined-callable", &context.id)],
+            input: contributed_input(input, "runtime-trace", TRACE_FINGERPRINT),
+            observation_contexts: vec![context.clone(), runtime.clone()],
+            callables: vec![callable("traced_callee", "traced-callable", &runtime.id)],
             call_sites: Vec::new(),
             call_site_attachments: vec![ContributedCallSiteAttachment {
                 call_site: ContributedCallSiteReference {
                     observation_context_id: context.id.clone(),
-                    caller_callable_id: "dispatch".into(),
-                    contributor_call_site_id: CALL_SITE_IDENTITY.into(),
+                    acquired_input_fingerprint,
+                    caller_callable_id: self.caller_callable_id.into(),
+                    contributor_call_site_id: ContributorCallSiteId::new("llvm-call:0").unwrap(),
                 },
-                resolution_revision: Some(ContributedResolutionRevision {
-                    resolution: Resolution::Complete,
-                    evidence: evidence(
-                        "whole-program-target-set",
-                        EvidenceScope::Static,
-                        EvidenceSupport::CallSiteResolution,
-                        &artifact,
-                        REFINEMENT_LINE,
-                    ),
-                }),
                 target_claims: vec![target_claim(
-                    "second_target",
-                    "refined-callable",
-                    &context.id,
+                    "traced_callee",
+                    "traced-callable",
+                    &runtime.id,
                     vec![evidence(
-                        "whole-program-possible-target",
-                        EvidenceScope::Static,
+                        "runtime-observed-target",
+                        EvidenceScope::Runtime,
                         EvidenceSupport::TargetClaim,
                         &artifact,
-                        REFINEMENT_LINE,
+                        TRACE_LINE,
                     )],
                 )],
             }],
         })
-    }
-}
-
-/// Two acquired inputs that publish the same contributor call-site identity in
-/// the same observation context, so a later reference cannot pick one.
-struct DuplicateCallSiteIdentityFixture;
-
-impl DuplicateCallSiteIdentityFixture {
-    const NAME: &'static str = "fixture.duplicate-call-site-identity";
-}
-
-impl EvidenceContributor for DuplicateCallSiteIdentityFixture {
-    fn identity(&self) -> ContributorIdentity {
-        identity(Self::NAME)
-    }
-
-    fn contribute(
-        &self,
-        input: &Path,
-        context: &ObservationContext,
-    ) -> Result<EvidenceContribution, String> {
-        if input.ends_with(TRACE_INPUT) {
-            Ok(StaticAndTraceFixture {
-                attachment: TraceAttachment::Attached,
-            }
-            .trace_contribution(input, context))
-        } else {
-            Ok(static_contribution(input, context))
-        }
     }
 }
 
@@ -367,6 +363,37 @@ fn publish_static_and_trace(attachment: TraceAttachment) -> Result<PublishedSnap
         publication_context(StaticAndTraceFixture::NAME),
         &StaticAndTraceFixture { attachment },
     )
+}
+
+/// Rewrites every reference to one evidence identity in an exported snapshot,
+/// so a hand-edited record stays internally consistent and the load has to
+/// reject it on provenance grounds rather than on a dangling reference.
+fn rename_evidence_reference(
+    exported: &mut serde_json::Value,
+    from: &serde_json::Value,
+    to: &serde_json::Value,
+) {
+    for claim in exported["target_claims"].as_array_mut().unwrap() {
+        for id in claim["evidence_ids"].as_array_mut().unwrap() {
+            if id == from {
+                *id = to.clone();
+            }
+        }
+    }
+    for derivation in exported["derivations"].as_array_mut().unwrap() {
+        for id in derivation["input_evidence_ids"].as_array_mut().unwrap() {
+            if id == from {
+                *id = to.clone();
+            }
+        }
+    }
+    for resolution in exported["call_site_resolutions"].as_array_mut().unwrap() {
+        for id in resolution["evidence_ids"].as_array_mut().unwrap() {
+            if id == from {
+                *id = to.clone();
+            }
+        }
+    }
 }
 
 fn located_evidence(snapshot: &PublishedSnapshot, evidence_type: &str) -> Vec<(String, usize)> {
@@ -587,19 +614,44 @@ fn explanations_show_static_and_runtime_provenance_side_by_side() {
         .collect::<BTreeSet<_>>();
     assert_eq!(explained_inputs.len(), 2);
 
-    // The viewer renders the same explanation, so both provenances reach the
-    // projection client without it reinterpreting them.
+    // The viewer builds its evidence rows in the browser from the embedded
+    // explanation, so the rendered row is asserted in two parts: the evidence
+    // <dd> renders each record's own artifact, line, and acquired input, and
+    // the embedded record carries the trace provenance those fields bind to.
     let html = application.render_snapshot_viewer(&snapshot).unwrap();
-    assert!(html.contains(TRACE_INPUT));
-    assert!(html.contains(STATIC_INPUT));
+    let evidence_row = html
+        .split("<dt>Evidence</dt><dd>${evidence}</dd>")
+        .next()
+        .unwrap();
+    assert!(
+        evidence_row.contains(
+            "Provenance: <code>${escapeHtml(record.source_location.artifact)}:${record.source_location.line}</code> from acquired input <code>${escapeHtml(record.acquired_input_id)}</code>"
+        ),
+        "every evidence row must render its own provenance"
+    );
+    let trace_evidence = explanation
+        .evidence_records
+        .iter()
+        .find(|record| record.evidence_type == "runtime-observed-target")
+        .unwrap();
+    assert!(html.contains(&serde_json::to_string(trace_evidence).unwrap()));
+    assert!(html.contains("<dt>Call-site location</dt>"));
 }
 
 #[test]
-fn unknown_or_ambiguous_call_site_references_are_rejected() {
+fn unknown_or_mismatched_call_site_references_are_rejected() {
     let unknown = publish_static_and_trace(TraceAttachment::UnknownCallSiteIdentity).unwrap_err();
     assert!(
         unknown.contains("unknown contributor call-site identity 'dispatch#9'"),
         "unexpected error: {unknown}"
+    );
+
+    let unknown_input =
+        publish_static_and_trace(TraceAttachment::UnknownAcquiredInput).unwrap_err();
+    assert!(
+        unknown_input.contains("unknown contributor call-site identity 'dispatch#0'")
+            && unknown_input.contains("fixture:never-acquired"),
+        "unexpected error: {unknown_input}"
     );
 
     let mismatched = publish_static_and_trace(TraceAttachment::MismatchedCaller).unwrap_err();
@@ -607,22 +659,6 @@ fn unknown_or_ambiguous_call_site_references_are_rejected() {
         mismatched.contains("names caller identity 'first_target'")
             && mismatched.contains("was contributed by caller 'dispatch'"),
         "unexpected error: {mismatched}"
-    );
-
-    let ambiguous = Application
-        .publish_snapshot(
-            &[
-                PathBuf::from(STATIC_INPUT),
-                PathBuf::from(OTHER_STATIC_INPUT),
-                PathBuf::from(TRACE_INPUT),
-            ],
-            publication_context(DuplicateCallSiteIdentityFixture::NAME),
-            &DuplicateCallSiteIdentityFixture,
-        )
-        .unwrap_err();
-    assert!(
-        ambiguous.contains("ambiguous contributor call-site identity 'dispatch#0'"),
-        "unexpected error: {ambiguous}"
     );
 }
 
@@ -638,58 +674,6 @@ fn contributed_evidence_must_cite_the_acquired_input_it_was_read_from() {
 }
 
 #[test]
-fn runtime_evidence_cannot_revise_a_static_target_set_resolution() {
-    let error = publish_static_and_trace(TraceAttachment::RuntimeResolutionRevision).unwrap_err();
-    assert!(
-        error.contains("Runtime") && error.contains("incompatible with observation context"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn a_later_acquired_input_may_revise_the_published_target_set_resolution() {
-    let application = Application;
-    let snapshot = application
-        .publish_snapshot(
-            &[PathBuf::from(STATIC_INPUT), PathBuf::from(REFINEMENT_INPUT)],
-            publication_context(WholeProgramRefinementFixture::NAME),
-            &WholeProgramRefinementFixture,
-        )
-        .unwrap();
-
-    let resolution = &snapshot.call_site_resolutions()[0];
-    assert_eq!(resolution.resolution, Resolution::Complete);
-    // Refinement adds evidence rather than replacing it: the static input's
-    // account of the call site survives alongside the revision.
-    assert_eq!(resolution.evidence_ids.len(), 2);
-    assert_eq!(
-        located_evidence(&snapshot, "whole-program-target-set"),
-        [(REFINEMENT_INPUT.to_string(), REFINEMENT_LINE)]
-    );
-
-    let result = application
-        .query_snapshot(
-            &snapshot,
-            NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(result.call_sites[0].resolution, Resolution::Complete);
-    assert_eq!(result.call_sites[0].targets.len(), 2);
-    assert!(
-        result
-            .relationships
-            .iter()
-            .all(|relationship| relationship.resolution == Resolution::Complete)
-    );
-    application
-        .load_snapshot_json(&application.export_snapshot_json(&snapshot).unwrap())
-        .unwrap();
-}
-
-#[test]
 fn hand_edited_evidence_provenance_is_rejected_on_load() {
     let application = Application;
     let snapshot = publish_static_and_trace(TraceAttachment::Attached).unwrap();
@@ -701,13 +685,18 @@ fn hand_edited_evidence_provenance_is_rejected_on_load() {
         .iter()
         .position(|record| record["evidence_type"] == serde_json::json!("runtime-observed-target"))
         .unwrap();
-    let static_input_id = snapshot
-        .acquired_inputs()
-        .iter()
-        .find(|input| input.path == STATIC_INPUT)
-        .unwrap()
-        .id
-        .clone();
+    let acquired_input_id = |path: &str| {
+        serde_json::json!(
+            snapshot
+                .acquired_inputs()
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap()
+                .id
+        )
+    };
+    let static_input_id = acquired_input_id(STATIC_INPUT);
+    let trace_input_id = acquired_input_id(TRACE_INPUT);
     let load = |value: &serde_json::Value| {
         application
             .load_snapshot_json(&serde_json::to_string(value).unwrap())
@@ -743,6 +732,93 @@ fn hand_edited_evidence_provenance_is_rejected_on_load() {
         "unexpected error: {error}"
     );
 
+    // (a) Re-attributing a trace's observation to the static artifact — the
+    // exact failure mode this issue is about — is rejected even when input id,
+    // artifact, and line are rewritten consistently, because core-generated
+    // identities record the acquired input they were published from.
+    let mut relocated_runtime_evidence = exported.clone();
+    relocated_runtime_evidence["evidence_records"][runtime_evidence_index]["acquired_input_id"] =
+        serde_json::json!(static_input_id);
+    relocated_runtime_evidence["evidence_records"][runtime_evidence_index]["source_location"] = serde_json::json!({
+        "input_id": static_input_id,
+        "artifact": STATIC_INPUT,
+        "line": CALL_SITE_LINE,
+    });
+    let error = load(&relocated_runtime_evidence);
+    assert!(
+        error.contains("was not published from acquired input"),
+        "unexpected error: {error}"
+    );
+
+    // (a, continued) Rewriting the evidence identity as well does not help: an
+    // evidence record and the manifestations it relates are read from the same
+    // acquired input, and the traced manifestation stays in the trace input.
+    let mut renamed_runtime_evidence = relocated_runtime_evidence;
+    let runtime_evidence_id = exported["evidence_records"][runtime_evidence_index]["id"].clone();
+    let relabelled = serde_json::json!("evidence:snapshot:evidence-provenance:input:0:relabelled");
+    renamed_runtime_evidence["evidence_records"][runtime_evidence_index]["id"] = relabelled.clone();
+    rename_evidence_reference(
+        &mut renamed_runtime_evidence,
+        &runtime_evidence_id,
+        &relabelled,
+    );
+    let error = load(&renamed_runtime_evidence);
+    assert!(
+        error.contains("were read from different acquired inputs"),
+        "unexpected error: {error}"
+    );
+
+    // (b) Reassigning the call site's own resolution evidence to the trace
+    // input does not escape the location check either.
+    let resolution_evidence_index = exported["evidence_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|record| record["evidence_type"] == serde_json::json!("static-indirect-call"))
+        .unwrap();
+    let mut reassigned_resolution_evidence = exported.clone();
+    let resolution_evidence_id =
+        exported["evidence_records"][resolution_evidence_index]["id"].clone();
+    let relabelled = serde_json::json!("evidence:snapshot:evidence-provenance:input:1:relabelled");
+    reassigned_resolution_evidence["evidence_records"][resolution_evidence_index]["id"] =
+        relabelled.clone();
+    reassigned_resolution_evidence["evidence_records"][resolution_evidence_index]["acquired_input_id"] =
+        serde_json::json!(trace_input_id);
+    reassigned_resolution_evidence["evidence_records"][resolution_evidence_index]["source_location"] = serde_json::json!({
+        "input_id": trace_input_id,
+        "artifact": TRACE_INPUT,
+        "line": TRACE_LINE,
+    });
+    rename_evidence_reference(
+        &mut reassigned_resolution_evidence,
+        &resolution_evidence_id,
+        &relabelled,
+    );
+    let error = load(&reassigned_resolution_evidence);
+    assert!(
+        error.contains("disagree about the call-site location"),
+        "unexpected error: {error}"
+    );
+
+    // (c) Emptying an acquired input's evidence artifact, and the artifacts of
+    // the evidence read from it, no longer loads.
+    let mut empty_artifact = exported.clone();
+    for input in empty_artifact["acquired_inputs"].as_array_mut().unwrap() {
+        if input["path"] == serde_json::json!(TRACE_INPUT) {
+            input["evidence_artifact"] = serde_json::json!("");
+        }
+    }
+    for record in empty_artifact["evidence_records"].as_array_mut().unwrap() {
+        if record["acquired_input_id"] == serde_json::json!(trace_input_id) {
+            record["source_location"]["artifact"] = serde_json::json!("");
+        }
+    }
+    let error = load(&empty_artifact);
+    assert!(
+        error.contains("acquired input evidence artifact cannot be empty"),
+        "unexpected error: {error}"
+    );
+
     // Resolution evidence read in the same acquired input as the call site
     // still has to agree with where that call site is.
     let resolution_evidence_index = exported["evidence_records"]
@@ -758,5 +834,116 @@ fn hand_edited_evidence_provenance_is_rejected_on_load() {
     assert!(
         error.contains("disagree about the call-site location"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn call_site_references_select_one_of_two_llvm_inputs_sharing_a_call_site_identity() {
+    let application = Application;
+    let snapshot = application
+        .publish_snapshot(
+            &[
+                PathBuf::from(FIRST_LLVM_INPUT),
+                PathBuf::from(SECOND_LLVM_INPUT),
+                PathBuf::from(TRACE_INPUT),
+            ],
+            publication_context(LlvmAndTraceFixture::NAME),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+        )
+        .unwrap();
+
+    // Both `.ll` inputs published the contributor call-site identity
+    // `llvm-call:0`; the acquired-input fingerprint in the reference selects
+    // the second one, and no third call-site entity appears.
+    let call_sites = snapshot
+        .program_entities()
+        .iter()
+        .filter(|entity| entity.kind == ProgramEntityKind::CallSite)
+        .collect::<Vec<_>>();
+    assert_eq!(call_sites.len(), 2);
+    assert_eq!(
+        call_sites
+            .iter()
+            .map(|entity| entity.source_location.as_ref().unwrap().artifact.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([FIRST_LLVM_INPUT, SECOND_LLVM_INPUT])
+    );
+
+    let callees = |caller: &str| {
+        application
+            .query_snapshot(
+                &snapshot,
+                NamedQuery::Callees {
+                    caller_name: caller.into(),
+                    caller_entity_id: None,
+                },
+            )
+            .unwrap()
+    };
+    let second = callees("second_caller");
+    assert_eq!(second.call_sites.len(), 1);
+    assert_eq!(
+        second
+            .call_sites
+            .iter()
+            .flat_map(|site| &site.targets)
+            .map(|target| target.callee_display_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["second_callee", "traced_callee"])
+    );
+    let first = callees("first_caller");
+    assert_eq!(first.call_sites.len(), 1);
+    assert_eq!(
+        first
+            .call_sites
+            .iter()
+            .flat_map(|site| &site.targets)
+            .map(|target| target.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["first_callee"]
+    );
+
+    assert_eq!(
+        located_evidence(&snapshot, "runtime-observed-target"),
+        [(TRACE_INPUT.to_string(), TRACE_LINE)]
+    );
+    application
+        .load_snapshot_json(&application.export_snapshot_json(&snapshot).unwrap())
+        .unwrap();
+}
+
+#[test]
+fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_rejected() {
+    let unknown = Application
+        .publish_snapshot(
+            &[PathBuf::from(SECOND_LLVM_INPUT), PathBuf::from(TRACE_INPUT)],
+            publication_context(LlvmAndTraceFixture::NAME),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller")
+                .with_unknown_acquired_input(),
+        )
+        .unwrap_err();
+    assert!(
+        unknown.contains("unknown contributor call-site identity 'llvm-call:0'")
+            && unknown.contains("fnv1a64:0000000000000000"),
+        "unexpected error: {unknown}"
+    );
+
+    // The same artifact acquired twice has one content fingerprint, so the
+    // qualifier cannot separate the two inputs and the reference is ambiguous
+    // rather than silently resolved to whichever came first.
+    let ambiguous = Application
+        .publish_snapshot(
+            &[
+                PathBuf::from(SECOND_LLVM_INPUT),
+                PathBuf::from(SECOND_LLVM_INPUT),
+                PathBuf::from(TRACE_INPUT),
+            ],
+            publication_context(LlvmAndTraceFixture::NAME),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+        )
+        .unwrap_err();
+    assert!(
+        ambiguous.contains("ambiguous contributor call-site identity 'llvm-call:0'"),
+        "unexpected error: {ambiguous}"
     );
 }

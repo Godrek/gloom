@@ -1,8 +1,8 @@
 use crate::contributor::{
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, fingerprint_parts,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, fingerprint_parts,
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
@@ -123,7 +123,9 @@ impl EvidenceContributor for LlvmTextContributor {
                     // guarantee one call instruction per line, so a line-based
                     // identity would not be unique in the artifact, and the
                     // artifact itself is pinned by its content fingerprint.
-                    let contributor_call_site_id = format!("llvm-call:{call_index}");
+                    let contributor_call_site_id =
+                        ContributorCallSiteId::new(format!("llvm-call:{call_index}"))
+                            .expect("generated call-site identity must be well formed");
                     let location = ContributedEvidenceLocation {
                         evidence_artifact: artifact.clone(),
                         line: call.line,

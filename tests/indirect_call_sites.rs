@@ -2,10 +2,10 @@ use gloom::app::{Application, NamedQuery};
 use gloom::{
     CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
-    ProgramEntityKind, Resolution,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
+    ObservationContext, ProgramEntityKind, Resolution,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -94,7 +94,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 })
                 .collect(),
             call_sites: vec![ContributedCallSite {
-                contributor_call_site_id: "dispatch:7".into(),
+                contributor_call_site_id: ContributorCallSiteId::new("dispatch:7").unwrap(),
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "dispatch".into(),
                 line: 7,
@@ -219,7 +219,8 @@ impl EvidenceContributor for SameLabelCallersFixture {
             ],
             call_sites: vec![
                 ContributedCallSite {
-                    contributor_call_site_id: "static-worker-a:1".into(),
+                    contributor_call_site_id: ContributorCallSiteId::new("static-worker-a:1")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "static-worker-a".into(),
                     line: 1,
@@ -235,7 +236,8 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     target_claims: Vec::new(),
                 },
                 ContributedCallSite {
-                    contributor_call_site_id: "static-worker-b:2".into(),
+                    contributor_call_site_id: ContributorCallSiteId::new("static-worker-b:2")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "static-worker-b".into(),
                     line: 2,
@@ -251,7 +253,8 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     target_claims: Vec::new(),
                 },
                 ContributedCallSite {
-                    contributor_call_site_id: "runtime-worker:3".into(),
+                    contributor_call_site_id: ContributorCallSiteId::new("runtime-worker:3")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "runtime-worker".into(),
                     line: 3,
@@ -313,7 +316,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                 })
                 .collect(),
             call_sites: vec![ContributedCallSite {
-                contributor_call_site_id: "caller:1".into(),
+                contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "caller".into(),
                 line: 1,
@@ -1265,7 +1268,7 @@ fn loaded_snapshots_revalidate_derivation_rules_and_call_site_locations() {
         serde_json::json!(0);
     let error = load(&zero_line_entity);
     assert!(
-        error.contains("has no source line"),
+        error.contains("has no location within its evidence artifact"),
         "unexpected error: {error}"
     );
 
@@ -1282,7 +1285,7 @@ fn loaded_snapshots_revalidate_derivation_rules_and_call_site_locations() {
     zero_line_evidence["evidence_records"][0]["source_location"]["line"] = serde_json::json!(0);
     let error = load(&zero_line_evidence);
     assert!(
-        error.contains("no source line"),
+        error.contains("no location within its evidence artifact"),
         "unexpected error: {error}"
     );
 

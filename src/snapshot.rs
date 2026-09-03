@@ -1,6 +1,6 @@
 use crate::contributor::{
-    ContributedCallSite, ContributedCallSiteAttachment, ContributorIdentity, EvidenceContribution,
-    fingerprint_parts,
+    ContributedCallSite, ContributedCallSiteAttachment, ContributedEvidence, ContributorIdentity,
+    EvidenceContribution, fingerprint_parts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -640,6 +640,20 @@ impl PublishedSnapshot {
                 ));
             }
         }
+        for input in &self.acquired_inputs {
+            for (field, value) in [
+                ("identity", input.id.as_str()),
+                ("path", input.path.as_str()),
+                ("evidence artifact", input.evidence_artifact.as_str()),
+                ("media type", input.media_type.as_str()),
+                ("acquisition method", input.acquisition_method.as_str()),
+                ("content fingerprint", input.content_fingerprint.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(format!("acquired input {field} cannot be empty"));
+                }
+            }
+        }
         let inputs_by_id: BTreeMap<_, _> = self
             .acquired_inputs
             .iter()
@@ -703,6 +717,15 @@ impl PublishedSnapshot {
             if !inputs_by_id.contains_key(manifestation.acquired_input_id.as_str()) {
                 return Err(format!(
                     "manifestation '{}' references unknown acquired input '{}'",
+                    manifestation.id, manifestation.acquired_input_id
+                ));
+            }
+            if !identity_names_acquired_input(
+                manifestation.id.as_str(),
+                &manifestation.acquired_input_id,
+            ) {
+                return Err(format!(
+                    "manifestation '{}' was not published from acquired input '{}'",
                     manifestation.id, manifestation.acquired_input_id
                 ));
             }
@@ -776,7 +799,16 @@ impl PublishedSnapshot {
                         ));
                     }
                     if location.line == 0 {
-                        return Err(format!("call site '{}' has no source line", entity.id));
+                        return Err(format!(
+                            "call site '{}' has no location within its evidence artifact",
+                            entity.id
+                        ));
+                    }
+                    if !identity_names_acquired_input(entity.id.as_str(), &location.input_id) {
+                        return Err(format!(
+                            "call site '{}' was not published from acquired input '{}'",
+                            entity.id, location.input_id
+                        ));
                     }
                 }
             }
@@ -846,7 +878,16 @@ impl PublishedSnapshot {
                 ));
             }
             if evidence.source_location.line == 0 {
-                return Err(format!("evidence '{}' has no source line", evidence.id));
+                return Err(format!(
+                    "evidence '{}' has no location within its evidence artifact",
+                    evidence.id
+                ));
+            }
+            if !identity_names_acquired_input(evidence.id.as_str(), &evidence.acquired_input_id) {
+                return Err(format!(
+                    "evidence '{}' was not published from acquired input '{}'",
+                    evidence.id, evidence.acquired_input_id
+                ));
             }
             // Evidence records the provenance its contributor observed: the
             // acquired input it read and the line within that input's evidence
@@ -854,17 +895,20 @@ impl PublishedSnapshot {
             // site, so runtime evidence acquired from a trace keeps the trace's
             // input and line instead of inheriting the static call site's.
             //
-            // Only evidence read in the same acquired input as the call site
-            // can say where that call site is. Within one input, resolution
-            // evidence is a statement about the site itself and must agree with
-            // it; a target claim may be justified by another line of the same
-            // artifact, such as where a function pointer was assigned.
+            // A call site's target-set resolution is asserted only by the
+            // contribution that published the site, so resolution evidence is a
+            // statement about that site read in that same acquired input and
+            // must agree with where the site is. Target evidence may come from
+            // any acquired input, but is bound to the manifestation it names:
+            // an evidence record and the manifestations it relates are always
+            // read from the same acquired input, which is what stops a
+            // hand-edited export from re-attributing a trace's observation to a
+            // static artifact.
             let call_site_location = subject
                 .source_location
                 .as_ref()
                 .expect("validated call site must carry a source location");
             if evidence.support == EvidenceSupport::CallSiteResolution
-                && evidence.source_location.input_id == call_site_location.input_id
                 && evidence.source_location != *call_site_location
             {
                 return Err(format!(
@@ -885,6 +929,12 @@ impl PublishedSnapshot {
                     return Err(format!(
                         "evidence '{}' and its related manifestations use different observation contexts",
                         evidence.id
+                    ));
+                }
+                if manifestation.acquired_input_id != evidence.acquired_input_id {
+                    return Err(format!(
+                        "evidence '{}' and manifestation '{}' were read from different acquired inputs",
+                        evidence.id, manifestation.id
                     ));
                 }
             }
@@ -1539,6 +1589,51 @@ fn ensure_callable(
     })
 }
 
+/// Publishes one contributed evidence record. Both the resolution evidence a
+/// call site is published with and the target evidence attached to it are built
+/// here, so every path records provenance, context, and support the same way.
+#[allow(clippy::too_many_arguments)]
+fn contributed_evidence_record(
+    id: EvidenceId,
+    contributed: ContributedEvidence,
+    observation_context_id: &ObservationContextId,
+    subject_entity_id: &ProgramEntityId,
+    related_manifestation_ids: Vec<ManifestationId>,
+    acquired_input_id: &AcquiredInputId,
+    evidence_artifact: &str,
+    description: String,
+) -> EvidenceRecord {
+    EvidenceRecord {
+        id,
+        acquired_input_id: acquired_input_id.clone(),
+        observation_context_id: observation_context_id.clone(),
+        evidence_type: contributed.evidence_type,
+        scope: contributed.scope,
+        support: contributed.support,
+        subject_entity_id: subject_entity_id.clone(),
+        related_manifestation_ids,
+        // Evidence keeps the provenance its contributor acquired it from, which
+        // for a later acquired input is not where the call site was published.
+        source_location: SourceLocation {
+            input_id: acquired_input_id.clone(),
+            artifact: evidence_artifact.into(),
+            line: contributed.location.line,
+        },
+        description,
+    }
+}
+
+/// Core-generated identities embed the index of the acquired input they were
+/// published from. Checking that against the input a record claims keeps a
+/// hand-edited export from moving one record's provenance to another input
+/// while the rest of the snapshot still refers to it by its original identity.
+fn identity_names_acquired_input(id: &str, acquired_input_id: &AcquiredInputId) -> bool {
+    acquired_input_id
+        .as_str()
+        .rsplit_once(':')
+        .is_some_and(|(_, index)| id.contains(&format!(":input:{index}:")))
+}
+
 fn call_site_explanation_handle(call_site_id: &ProgramEntityId) -> ExplanationHandle {
     ExplanationHandle(format!("explanation:{call_site_id}"))
 }
@@ -1593,13 +1688,19 @@ pub(crate) fn publish(
     let mut derivations = Vec::new();
     let mut relationships = Vec::new();
     let mut projected_call_sites = Vec::new();
-    let mut published_call_sites: BTreeMap<(ObservationContextId, String), Vec<PublishedCallSite>> =
-        BTreeMap::new();
+    // Keyed by the qualifier a contributor call-site identity is unique within:
+    // its observation context and its acquired input, the latter named by the
+    // content fingerprint the contributor declared for it.
+    let mut published_call_sites: BTreeMap<
+        (ObservationContextId, String, String),
+        Vec<PublishedCallSite>,
+    > = BTreeMap::new();
 
     for (input_index, contribution) in contributions.into_iter().enumerate() {
         let input_id = AcquiredInputId::new(format!("input:{snapshot_id}:{input_index}"));
         let path_text = contribution.input.path.clone();
         let evidence_artifact = contribution.input.evidence_artifact.clone();
+        let content_fingerprint = contribution.input.content_fingerprint.clone();
         acquired_inputs.push(AcquiredInput {
             id: input_id.clone(),
             path: path_text.clone(),
@@ -1679,25 +1780,19 @@ pub(crate) fn publish(
                     let evidence_id = EvidenceId::new(format!(
                         "evidence:{snapshot_id}:input:{input_index}:call-site:{call_site_index}"
                     ));
-                    evidence_records.push(EvidenceRecord {
-                        id: evidence_id.clone(),
-                        acquired_input_id: input_id.clone(),
-                        observation_context_id: call.observation_context_id.clone(),
-                        evidence_type: call.evidence.evidence_type,
-                        scope: call.evidence.scope,
-                        support: call.evidence.support,
-                        subject_entity_id: call_site_id.clone(),
-                        related_manifestation_ids: vec![caller.manifestation_id.clone()],
-                        source_location: SourceLocation {
-                            input_id: input_id.clone(),
-                            artifact: evidence_artifact.clone(),
-                            line: call.evidence.location.line,
-                        },
-                        description: format!(
+                    evidence_records.push(contributed_evidence_record(
+                        evidence_id.clone(),
+                        call.evidence,
+                        &call.observation_context_id,
+                        &call_site_id,
+                        vec![caller.manifestation_id.clone()],
+                        &input_id,
+                        &evidence_artifact,
+                        format!(
                             "contributed call site has {:?} target-set resolution",
                             call.resolution
                         ),
-                    });
+                    ));
                     call_site_resolutions.push(CallSiteResolution {
                         call_site_id: call_site_id.clone(),
                         observation_context_id: call.observation_context_id.clone(),
@@ -1718,7 +1813,8 @@ pub(crate) fn publish(
                     published_call_sites
                         .entry((
                             call.observation_context_id.clone(),
-                            call.contributor_call_site_id,
+                            content_fingerprint.clone(),
+                            call.contributor_call_site_id.as_str().to_owned(),
                         ))
                         .or_default()
                         .push(PublishedCallSite {
@@ -1746,14 +1842,16 @@ pub(crate) fn publish(
                     let candidates = published_call_sites
                         .get(&(
                             reference.observation_context_id.clone(),
-                            reference.contributor_call_site_id.clone(),
+                            reference.acquired_input_fingerprint.clone(),
+                            reference.contributor_call_site_id.as_str().to_owned(),
                         ))
                         .map_or(&[][..], Vec::as_slice);
                     let published = match candidates {
                         [] => {
                             return Err(format!(
-                                "call-site attachment references unknown contributor call-site identity '{}' in observation context '{}'",
+                                "call-site attachment references unknown contributor call-site identity '{}' in acquired input '{}' and observation context '{}'",
                                 reference.contributor_call_site_id,
+                                reference.acquired_input_fingerprint,
                                 reference.observation_context_id
                             ));
                         }
@@ -1765,9 +1863,10 @@ pub(crate) fn publish(
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Err(format!(
-                                "call-site attachment references ambiguous contributor call-site identity '{}' in observation context '{}': acquired inputs {inputs} each published it",
+                                "call-site attachment references ambiguous contributor call-site identity '{}' in observation context '{}': acquired inputs {inputs} share content fingerprint '{}' and each published it",
                                 reference.contributor_call_site_id,
-                                reference.observation_context_id
+                                reference.observation_context_id,
+                                reference.acquired_input_fingerprint
                             ));
                         }
                     };
@@ -1786,35 +1885,6 @@ pub(crate) fn publish(
                     let resolution_observation_context_id = call_site_resolutions[resolution_index]
                         .observation_context_id
                         .clone();
-                    if let Some(revision) = attachment.resolution_revision {
-                        let evidence_id = EvidenceId::new(format!(
-                            "evidence:{snapshot_id}:input:{input_index}:attachment:{contributed_index}:resolution"
-                        ));
-                        evidence_records.push(EvidenceRecord {
-                            id: evidence_id.clone(),
-                            acquired_input_id: input_id.clone(),
-                            observation_context_id: resolution_observation_context_id.clone(),
-                            evidence_type: revision.evidence.evidence_type,
-                            scope: revision.evidence.scope,
-                            support: revision.evidence.support,
-                            subject_entity_id: call_site_id.clone(),
-                            related_manifestation_ids: vec![caller.manifestation_id.clone()],
-                            source_location: SourceLocation {
-                                input_id: input_id.clone(),
-                                artifact: evidence_artifact.clone(),
-                                line: revision.evidence.location.line,
-                            },
-                            description: format!(
-                                "contributed evidence revises the target-set resolution to {:?}",
-                                revision.resolution
-                            ),
-                        });
-                        // Earlier evidence for this call site is kept: only the
-                        // resolution value the contributor revised changes.
-                        let resolution = &mut call_site_resolutions[resolution_index];
-                        resolution.resolution = revision.resolution;
-                        resolution.evidence_ids.push(evidence_id);
-                    }
                     (
                         AttachedCallSite {
                             call_site_id,
@@ -1858,28 +1928,19 @@ pub(crate) fn publish(
                     let target_evidence_id = EvidenceId::new(format!(
                         "evidence:{snapshot_id}:{id_prefix}:target:{target_index}:{evidence_index}"
                     ));
-                    evidence_records.push(EvidenceRecord {
-                        id: target_evidence_id.clone(),
-                        acquired_input_id: input_id.clone(),
-                        observation_context_id: target.observation_context_id.clone(),
-                        evidence_type: evidence.evidence_type,
-                        scope: evidence.scope,
-                        support: evidence.support,
-                        subject_entity_id: call_site_id.clone(),
-                        related_manifestation_ids: vec![callee.manifestation_id.clone()],
-                        // The evidence keeps the provenance its contributor
-                        // acquired it from, which for a later acquired input is
-                        // not where the call site was published.
-                        source_location: SourceLocation {
-                            input_id: input_id.clone(),
-                            artifact: evidence_artifact.clone(),
-                            line: evidence.location.line,
-                        },
-                        description: format!(
+                    evidence_records.push(contributed_evidence_record(
+                        target_evidence_id.clone(),
+                        evidence,
+                        &target.observation_context_id,
+                        &call_site_id,
+                        vec![callee.manifestation_id.clone()],
+                        &input_id,
+                        &evidence_artifact,
+                        format!(
                             "contributed evidence identifies '{}' as a possible target",
                             target.callee_display_name
                         ),
-                    });
+                    ));
                     target_evidence_ids.push(target_evidence_id);
                 }
                 let claim_id = TargetClaimId::new(format!(
@@ -1947,24 +2008,6 @@ pub(crate) fn publish(
                     },
                 ),
         );
-    }
-
-    // A later acquired input may revise a published call site's target-set
-    // resolution, so the projection is rebuilt from the canonical resolution
-    // records rather than from whichever value each relationship saw first.
-    let published_resolutions = call_site_resolutions
-        .iter()
-        .map(|resolution| (resolution.call_site_id.clone(), resolution.resolution))
-        .collect::<BTreeMap<_, _>>();
-    for relationship in &mut relationships {
-        if let Some(resolution) = published_resolutions.get(&relationship.call_site_id) {
-            relationship.resolution = *resolution;
-        }
-    }
-    for projected in &mut projected_call_sites {
-        if let Some(resolution) = published_resolutions.get(&projected.call_site_id) {
-            projected.resolution = *resolution;
-        }
     }
 
     let mut evidence_ids_by_manifestation: BTreeMap<

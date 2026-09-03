@@ -1,6 +1,7 @@
 use crate::snapshot::{
     EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId, Resolution,
 };
+use std::fmt;
 use std::path::Path;
 
 /// Version of the seam between evidence contributors and the core model.
@@ -13,13 +14,16 @@ use std::path::Path;
 ///   with per-site target-set resolution, typed evidence (scope and support),
 ///   and zero or more target claims. Indirect-call evidence became a declared
 ///   capability.
-/// - `3`: every contributed evidence record carries its own provenance, an
-///   acquired-input reference plus the line it was read at, instead of
+/// - `3`: every contributed evidence record carries its own provenance, the
+///   evidence artifact it was read in plus the line it was read at, instead of
 ///   inheriting the enclosing call site's input and location. Contributors
 ///   also assert a contributor call-site identity for each contributed call
-///   site, so a later acquired input can attach target claims, and optionally
-///   a revised target-set resolution, to an already-published call site
-///   instead of publishing a second call-site entity.
+///   site, so a later acquired input can attach target claims to an
+///   already-published call site instead of publishing a second call-site
+///   entity. Such a reference names the observation context, the acquired
+///   input's content fingerprint, the caller's contributor callable identity,
+///   and the call-site identity; a call site's target-set resolution stays as
+///   the contribution that published it asserted.
 pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,13 +86,43 @@ pub struct ContributedEvidence {
     pub location: ContributedEvidenceLocation,
 }
 
+/// The identity an evidence contributor asserts for a call site. It is opaque
+/// to the core, which never parses it, but it must be a stable, exactly
+/// reproducible string: a later acquired input reaches an existing call site by
+/// repeating it, so surrounding whitespace and empty identities are rejected
+/// rather than silently trimmed into a different identity.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ContributorCallSiteId(String);
+
+impl ContributorCallSiteId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value {
+            return Err(format!(
+                "contributor call-site identity {value:?} must be non-empty and free of surrounding whitespace"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContributorCallSiteId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallSite {
     /// The identity the contributor asserts for this call site. It must be
     /// unique within its observation context and acquired input, and it is the
     /// only handle by which a later acquired input may attach further evidence
     /// to this call site.
-    pub contributor_call_site_id: String,
+    pub contributor_call_site_id: ContributorCallSiteId,
     pub kind: ContributedCallKind,
     pub caller_callable_id: String,
     pub line: usize,
@@ -100,30 +134,30 @@ pub struct ContributedCallSite {
 
 /// A reference to a call site an acquired input already published.
 ///
+/// A contributor call-site identity is unique only within one observation
+/// context and one acquired input, so a reference has to name the acquired
+/// input too. It does that by content fingerprint, the same fingerprint the
+/// contributor declared for that input, because acquired-input identities are
+/// assigned by the core at publication time and paths are not stable evidence.
+///
 /// Only the contributor's asserted identities may join a later acquired input's
 /// evidence to an existing call site: display names, source lines, and similar
 /// bodies never do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallSiteReference {
     pub observation_context_id: ObservationContextId,
+    pub acquired_input_fingerprint: String,
     pub caller_callable_id: String,
-    pub contributor_call_site_id: String,
+    pub contributor_call_site_id: ContributorCallSiteId,
 }
 
-/// A target-set resolution that supersedes the one an earlier acquired input
-/// published for a call site, together with the evidence supporting it. The
-/// superseded evidence is retained; only the resolution value changes.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContributedResolutionRevision {
-    pub resolution: Resolution,
-    pub evidence: ContributedEvidence,
-}
-
-/// Evidence a later acquired input attaches to an already-published call site.
+/// Target claims a later acquired input attaches to an already-published call
+/// site. An attachment never restates the call site's target-set resolution:
+/// the resolution stays exactly as the contribution that published the site
+/// asserted it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallSiteAttachment {
     pub call_site: ContributedCallSiteReference,
-    pub resolution_revision: Option<ContributedResolutionRevision>,
     pub target_claims: Vec<ContributedTargetClaim>,
 }
 
@@ -270,10 +304,7 @@ impl EvidenceContribution {
         let artifact = self.input.evidence_artifact.as_str();
         let mut call_site_identities = std::collections::BTreeSet::new();
         for call_site in &self.call_sites {
-            if call_site.caller_callable_id.trim().is_empty()
-                || call_site.contributor_call_site_id.trim().is_empty()
-                || call_site.line == 0
-            {
+            if call_site.caller_callable_id.trim().is_empty() || call_site.line == 0 {
                 return Err("contributed call-site evidence is not fully qualified".into());
             }
             if !call_site_identities.insert((
@@ -355,8 +386,8 @@ impl EvidenceContribution {
         }
         for attachment in &self.call_site_attachments {
             let reference = &attachment.call_site;
-            if reference.contributor_call_site_id.trim().is_empty()
-                || reference.caller_callable_id.trim().is_empty()
+            if reference.caller_callable_id.trim().is_empty()
+                || reference.acquired_input_fingerprint.trim().is_empty()
             {
                 return Err("contributed call-site attachment does not identify the call site it attaches to".into());
             }
@@ -366,24 +397,11 @@ impl EvidenceContribution {
                     reference.observation_context_id
                 ));
             }
-            if attachment.target_claims.is_empty() && attachment.resolution_revision.is_none() {
+            if attachment.target_claims.is_empty() {
                 return Err(format!(
-                    "contributed call-site attachment to '{}' contributes neither target claims nor a revised resolution",
+                    "contributed call-site attachment to '{}' contributes no target claims",
                     reference.contributor_call_site_id
                 ));
-            }
-            if let Some(revision) = &attachment.resolution_revision {
-                // A revised resolution replaces a statement made in the call
-                // site's own observation context, so its evidence has to hold
-                // in that context: a runtime trace cannot declare a static
-                // target set complete.
-                revision.evidence.validate(
-                    contexts_by_id
-                        .get(reference.observation_context_id.as_str())
-                        .expect("contributed attachment context must exist"),
-                    EvidenceSupport::CallSiteResolution,
-                    artifact,
-                )?;
             }
             for target in &attachment.target_claims {
                 validate_target_claim(target, &context_ids, &contexts_by_id, artifact)?;
@@ -443,7 +461,7 @@ impl ContributedEvidence {
         }
         if self.location.line == 0 {
             return Err(format!(
-                "contributed evidence '{}' has no source line",
+                "contributed evidence '{}' has no location within its evidence artifact",
                 self.evidence_type
             ));
         }
@@ -512,7 +530,7 @@ mod tests {
                 observation_context_id: context.id.clone(),
             }],
             call_sites: vec![ContributedCallSite {
-                contributor_call_site_id: "caller:1".into(),
+                contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Direct,
                 caller_callable_id: "caller".into(),
                 line: 1,
@@ -554,6 +572,21 @@ mod tests {
             version: "1".into(),
             contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
             capabilities,
+        }
+    }
+
+    #[test]
+    fn contributor_call_site_identities_must_be_exactly_reproducible() {
+        assert_eq!(
+            ContributorCallSiteId::new("llvm-call:0").unwrap().as_str(),
+            "llvm-call:0"
+        );
+        for rejected in ["", "   ", " llvm-call:0", "llvm-call:0\n"] {
+            let error = ContributorCallSiteId::new(rejected).unwrap_err();
+            assert!(
+                error.contains("must be non-empty and free of surrounding whitespace"),
+                "unexpected error: {error}"
+            );
         }
     }
 

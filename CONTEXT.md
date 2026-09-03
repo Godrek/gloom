@@ -65,7 +65,7 @@ The identity an evidence contributor asserts for a callable within one observati
 _Avoid_: Symbol name, function name
 
 **Contributor call-site identity**:
-The identity an evidence contributor asserts for a call site within one observation context and acquired input. A later acquired input attaches target claims or evidence to an already-published call site by naming this identity together with the caller's contributor callable identity; matching display names or source lines never join call sites.
+The identity an evidence contributor asserts for a call site within one observation context and acquired input. A later acquired input attaches target claims to an already-published call site by naming this identity together with the acquired input it was published from and the caller's contributor callable identity; matching display names or source lines never join call sites.
 _Avoid_: Call-site key, call ID
 
 **Build-scoped source projection**:
