@@ -262,11 +262,19 @@ impl EvidenceScope {
     }
 }
 
+/// What an evidence record supports.
+///
+/// The subject entity of a record follows from its support: resolution and
+/// target evidence describe a call site, so their subject is that call site,
+/// while contributor-identity evidence describes one callable manifestation,
+/// so its subject is the callable entity that manifestation represents and its
+/// related manifestation is that manifestation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvidenceSupport {
     CallSiteResolution,
     TargetClaim,
+    ContributorIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -316,8 +324,11 @@ pub const CONTRIBUTED_EVIDENCE_TARGET_RULE: &str = "call-target-from-contributed
 /// asserts one contributor callable identity for a callable in each of its
 /// observation contexts; when that identity appears in more than one context
 /// of the same acquired input, the manifestations correspond. Display names
-/// never participate, and the claim cites the evidence that placed each
-/// manifestation in its context so the derivation can be recomputed.
+/// never participate, and the claim cites only the contributor-identity
+/// evidence for each of its manifestations, never resolution or target
+/// evidence, so the derivation can be recomputed. A manifestation without
+/// identity evidence takes no part in the claim, and the claim is not derived
+/// at all when fewer than two manifestations remain.
 pub const CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE: &str =
     "correspondence-from-contributor-callable-identity";
 
@@ -824,11 +835,23 @@ impl PublishedSnapshot {
                         evidence.id, evidence.subject_entity_id
                     )
                 })?;
-            if subject.kind != ProgramEntityKind::CallSite {
-                return Err(format!(
-                    "evidence record '{}' does not identify a call site",
-                    evidence.id
-                ));
+            match evidence.support {
+                EvidenceSupport::CallSiteResolution | EvidenceSupport::TargetClaim => {
+                    if subject.kind != ProgramEntityKind::CallSite {
+                        return Err(format!(
+                            "evidence record '{}' does not identify a call site",
+                            evidence.id
+                        ));
+                    }
+                }
+                EvidenceSupport::ContributorIdentity => {
+                    if subject.kind != ProgramEntityKind::Callable {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' does not identify a callable",
+                            evidence.id
+                        ));
+                    }
+                }
             }
             if evidence.source_location.input_id != evidence.acquired_input_id {
                 return Err(format!(
@@ -845,7 +868,9 @@ impl PublishedSnapshot {
             if evidence.source_location.line == 0 {
                 return Err(format!("evidence '{}' has no source line", evidence.id));
             }
-            if subject.source_location.as_ref() != Some(&evidence.source_location) {
+            if evidence.support != EvidenceSupport::ContributorIdentity
+                && subject.source_location.as_ref() != Some(&evidence.source_location)
+            {
                 return Err(format!(
                     "evidence '{}' and call site '{}' disagree about the call-site location",
                     evidence.id, subject.id
@@ -863,6 +888,27 @@ impl PublishedSnapshot {
                 if manifestation.observation_context_id != evidence.observation_context_id {
                     return Err(format!(
                         "evidence '{}' and its related manifestations use different observation contexts",
+                        evidence.id
+                    ));
+                }
+            }
+            if evidence.support == EvidenceSupport::ContributorIdentity {
+                let identified = match evidence.related_manifestation_ids.as_slice() {
+                    [manifestation_id] => manifestations_by_id
+                        .get(manifestation_id.as_str())
+                        .expect("validated related manifestation must exist"),
+                    _ => {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' must relate exactly one manifestation",
+                            evidence.id
+                        ));
+                    }
+                };
+                if identified.entity_id != evidence.subject_entity_id
+                    || identified.acquired_input_id != evidence.acquired_input_id
+                {
+                    return Err(format!(
+                        "contributor-identity evidence '{}' does not describe a manifestation of its subject callable",
                         evidence.id
                     ));
                 }
@@ -979,6 +1025,12 @@ impl PublishedSnapshot {
                         claim.id, evidence_id
                     )
                 })?;
+                if evidence.support != EvidenceSupport::ContributorIdentity {
+                    return Err(format!(
+                        "correspondence claim '{}' cites evidence '{}' with {:?} support instead of contributor-identity support",
+                        claim.id, evidence.id, evidence.support
+                    ));
+                }
                 if evidence.acquired_input_id != claim.acquired_input_id {
                     return Err(format!(
                         "correspondence claim '{}' and its evidence use different acquired inputs",
@@ -1554,8 +1606,8 @@ pub(crate) fn publish(
         });
 
         let mut identities = BTreeMap::new();
-        for function in contribution.callables {
-            ensure_callable(
+        for (callable_index, function) in contribution.callables.into_iter().enumerate() {
+            let callable = ensure_callable(
                 &function.contributor_callable_id,
                 &function.display_name,
                 &function.representation,
@@ -1568,6 +1620,27 @@ pub(crate) fn publish(
                 &mut program_entities,
                 &mut manifestations,
             )?;
+            evidence_records.push(EvidenceRecord {
+                id: EvidenceId::new(format!(
+                    "evidence:{snapshot_id}:input:{input_index}:callable-identity:{callable_index}"
+                )),
+                acquired_input_id: input_id.clone(),
+                observation_context_id: function.observation_context_id.clone(),
+                evidence_type: function.identity_evidence.evidence_type,
+                scope: function.identity_evidence.scope,
+                support: function.identity_evidence.support,
+                subject_entity_id: callable.entity_id,
+                related_manifestation_ids: vec![callable.manifestation_id],
+                source_location: SourceLocation {
+                    input_id: input_id.clone(),
+                    artifact: evidence_artifact.clone(),
+                    line: function.line,
+                },
+                description: format!(
+                    "contributed evidence asserts contributor callable identity '{}' for this manifestation",
+                    function.contributor_callable_id
+                ),
+            });
         }
 
         for (contributed_site_index, call) in contribution.call_sites.into_iter().enumerate() {
@@ -1740,13 +1813,16 @@ pub(crate) fn publish(
         );
     }
 
-    let mut evidence_ids_by_manifestation: BTreeMap<
+    let mut identity_evidence_by_manifestation: BTreeMap<
         (&AcquiredInputId, &ManifestationId),
         Vec<&EvidenceId>,
     > = BTreeMap::new();
     for evidence in &evidence_records {
+        if evidence.support != EvidenceSupport::ContributorIdentity {
+            continue;
+        }
         for manifestation_id in &evidence.related_manifestation_ids {
-            evidence_ids_by_manifestation
+            identity_evidence_by_manifestation
                 .entry((&evidence.acquired_input_id, manifestation_id))
                 .or_default()
                 .push(&evidence.id);
@@ -1759,8 +1835,8 @@ pub(crate) fn publish(
             .manifestation_ids
             .into_iter()
             .filter(|manifestation_id| {
-                let Some(related) =
-                    evidence_ids_by_manifestation.get(&(&seed.acquired_input_id, manifestation_id))
+                let Some(related) = identity_evidence_by_manifestation
+                    .get(&(&seed.acquired_input_id, manifestation_id))
                 else {
                     return false;
                 };

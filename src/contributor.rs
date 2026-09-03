@@ -13,7 +13,10 @@ use std::path::Path;
 ///   with per-site target-set resolution, typed evidence (scope and support),
 ///   and zero or more target claims. Indirect-call evidence became a declared
 ///   capability.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "2";
+/// - `3`: contributors emit one contributor-identity evidence record per
+///   contributed callable manifestation, located in the evidence artifact.
+///   Correspondence claims are derived from that identity evidence alone.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -39,6 +42,15 @@ pub struct ContributedInput {
     pub content_fingerprint: String,
 }
 
+/// One callable manifestation a contributor asserts in one of its observation
+/// contexts.
+///
+/// `identity_evidence` is the contributor's account of that assertion: exactly
+/// one [`EvidenceSupport::ContributorIdentity`] record per contributed
+/// callable, located at `line` in the contributed evidence artifact. It is the
+/// only evidence from which the core derives correspondence claims, so a
+/// manifestation a contribution never declares here, one introduced only by a
+/// target claim, can take part in no correspondence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallable {
     pub contributor_callable_id: String,
@@ -46,6 +58,8 @@ pub struct ContributedCallable {
     pub defined: bool,
     pub representation: String,
     pub observation_context_id: ObservationContextId,
+    pub line: usize,
+    pub identity_evidence: ContributedEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +210,18 @@ impl EvidenceContribution {
                     callable.observation_context_id
                 ));
             }
+            if callable.line == 0 {
+                return Err(format!(
+                    "contributed callable '{}' has no identity-evidence line",
+                    callable.contributor_callable_id
+                ));
+            }
+            callable.identity_evidence.validate(
+                contexts_by_id
+                    .get(callable.observation_context_id.as_str())
+                    .expect("contributed callable context must exist"),
+                EvidenceSupport::ContributorIdentity,
+            )?;
             let identity = (
                 callable.observation_context_id.as_str(),
                 callable.contributor_callable_id.as_str(),
@@ -366,6 +392,12 @@ mod tests {
                 defined: true,
                 representation: "fixture-callable".into(),
                 observation_context_id: context.id.clone(),
+                line: 1,
+                identity_evidence: ContributedEvidence {
+                    evidence_type: "static-callable-identity".into(),
+                    scope: EvidenceScope::Static,
+                    support: EvidenceSupport::ContributorIdentity,
+                },
             }],
             call_sites: vec![ContributedCallSite {
                 kind: ContributedCallKind::Direct,

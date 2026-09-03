@@ -78,13 +78,33 @@ impl EvidenceContributor for PossibleTargetsFixture {
             observation_contexts: vec![context.clone(), runtime_context.clone()],
             callables: ["dispatch", "first_target", "second_target"]
                 .into_iter()
-                .map(|name| ContributedCallable {
+                .enumerate()
+                .map(|(index, name)| ContributedCallable {
                     contributor_callable_id: name.into(),
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),
+                    line: index + 1,
+                    identity_evidence: evidence(
+                        "static-callable-identity",
+                        EvidenceScope::Static,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
                 })
+                .chain([ContributedCallable {
+                    contributor_callable_id: "first_target".into(),
+                    display_name: "first_target".into(),
+                    defined: true,
+                    representation: "runtime-fixture-callable".into(),
+                    observation_context_id: runtime_context.id.clone(),
+                    line: 4,
+                    identity_evidence: evidence(
+                        "runtime-callable-identity",
+                        EvidenceScope::Runtime,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
+                }])
                 .collect(),
             call_sites: vec![ContributedCallSite {
                 kind: ContributedCallKind::Indirect,
@@ -183,6 +203,12 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     defined: true,
                     representation: "static-worker-a".into(),
                     observation_context_id: context.id.clone(),
+                    line: 1,
+                    identity_evidence: evidence(
+                        "static-callable-identity",
+                        EvidenceScope::Static,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
                 },
                 ContributedCallable {
                     contributor_callable_id: "static-worker-b".into(),
@@ -190,6 +216,12 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     defined: true,
                     representation: "static-worker-b".into(),
                     observation_context_id: context.id.clone(),
+                    line: 2,
+                    identity_evidence: evidence(
+                        "static-callable-identity",
+                        EvidenceScope::Static,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
                 },
                 ContributedCallable {
                     contributor_callable_id: "runtime-worker".into(),
@@ -197,6 +229,12 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     defined: true,
                     representation: "runtime-worker".into(),
                     observation_context_id: runtime_context.id.clone(),
+                    line: 3,
+                    identity_evidence: evidence(
+                        "runtime-callable-identity",
+                        EvidenceScope::Runtime,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
                 },
             ],
             call_sites: vec![
@@ -275,12 +313,19 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
             observation_contexts: vec![context.clone()],
             callables: ["caller", "runtime_target"]
                 .into_iter()
-                .map(|name| ContributedCallable {
+                .enumerate()
+                .map(|(index, name)| ContributedCallable {
                     contributor_callable_id: name.into(),
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),
+                    line: index + 1,
+                    identity_evidence: evidence(
+                        "static-callable-identity",
+                        EvidenceScope::Static,
+                        EvidenceSupport::ContributorIdentity,
+                    ),
                 })
                 .collect(),
             call_sites: vec![ContributedCallSite {
@@ -674,13 +719,44 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([&static_manifestation.id, &runtime_manifestation.id])
     );
+    let correspondence_evidence = correspondence
+        .evidence_ids
+        .iter()
+        .map(|id| {
+            snapshot
+                .evidence_records()
+                .iter()
+                .find(|record| record.id == *id)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        correspondence_evidence
+            .iter()
+            .all(|record| record.support == EvidenceSupport::ContributorIdentity),
+        "correspondence must cite only contributor-identity evidence"
+    );
     assert_eq!(
-        correspondence.evidence_ids.iter().collect::<BTreeSet<_>>(),
+        correspondence_evidence
+            .iter()
+            .flat_map(|record| &record.related_manifestation_ids)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([&static_manifestation.id, &runtime_manifestation.id])
+    );
+    let cited_evidence_ids = correspondence.evidence_ids.iter().collect::<BTreeSet<_>>();
+    assert!(
         static_claim
             .evidence_ids
             .iter()
             .chain(&runtime_claim.evidence_ids)
-            .collect::<BTreeSet<_>>()
+            .chain(
+                snapshot
+                    .call_site_resolutions()
+                    .iter()
+                    .flat_map(|resolution| &resolution.evidence_ids)
+            )
+            .all(|id| !cited_evidence_ids.contains(id)),
+        "correspondence must cite neither target nor resolution evidence"
     );
     assert_eq!(
         static_target.correspondence_claim_ids,
