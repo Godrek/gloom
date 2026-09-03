@@ -492,7 +492,16 @@ pub struct NamedQueryResult {
     pub call_sites: Vec<ProjectedCallSite>,
 }
 
+/// An immutable program snapshot made available for queries.
+///
+/// A published snapshot is coherent by construction: the only ways to obtain
+/// one are publishing evidence contributions and deserializing an export, and
+/// both run `validate` before the value exists. The fields are private and
+/// there is no public constructor, so no safe code outside this crate can hold
+/// a snapshot whose invariants were never checked, and a republished export
+/// cannot smuggle in knowledge the core never derived.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SnapshotDocument")]
 pub struct PublishedSnapshot {
     schema_version: String,
     program_snapshot: ProgramSnapshot,
@@ -506,6 +515,52 @@ pub struct PublishedSnapshot {
     correspondence_claims: Vec<CorrespondenceClaim>,
     derivations: Vec<Derivation>,
     call_graph_projection: CallGraphProjection,
+}
+
+/// The wire form of a published snapshot: the shape an export is read back in,
+/// before anything has checked that it is coherent.
+///
+/// Deserialization of a [`PublishedSnapshot`] goes through this private type so
+/// that reading an export and accepting it stay one step. A document that
+/// `validate` rejects never becomes a snapshot, and the failure carries the
+/// same message the loader reports.
+#[derive(Deserialize)]
+struct SnapshotDocument {
+    schema_version: String,
+    program_snapshot: ProgramSnapshot,
+    acquired_inputs: Vec<AcquiredInput>,
+    observation_contexts: Vec<ObservationContext>,
+    program_entities: Vec<ProgramEntity>,
+    manifestations: Vec<Manifestation>,
+    evidence_records: Vec<EvidenceRecord>,
+    call_site_resolutions: Vec<CallSiteResolution>,
+    target_claims: Vec<TargetClaim>,
+    correspondence_claims: Vec<CorrespondenceClaim>,
+    derivations: Vec<Derivation>,
+    call_graph_projection: CallGraphProjection,
+}
+
+impl TryFrom<SnapshotDocument> for PublishedSnapshot {
+    type Error = String;
+
+    fn try_from(document: SnapshotDocument) -> Result<Self, Self::Error> {
+        let snapshot = Self {
+            schema_version: document.schema_version,
+            program_snapshot: document.program_snapshot,
+            acquired_inputs: document.acquired_inputs,
+            observation_contexts: document.observation_contexts,
+            program_entities: document.program_entities,
+            manifestations: document.manifestations,
+            evidence_records: document.evidence_records,
+            call_site_resolutions: document.call_site_resolutions,
+            target_claims: document.target_claims,
+            correspondence_claims: document.correspondence_claims,
+            derivations: document.derivations,
+            call_graph_projection: document.call_graph_projection,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
 }
 
 /// The contributor-identity evidence a snapshot publishes for one contributor
@@ -756,7 +811,7 @@ impl PublishedSnapshot {
         Ok(groups)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         if self.schema_version != SNAPSHOT_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported snapshot schema {:?}",
