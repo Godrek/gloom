@@ -240,6 +240,8 @@ pub struct EvidenceRecord {
     pub evidence_type: String,
     pub scope: EvidenceScope,
     pub support: EvidenceSupport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness_basis: Option<CompletenessBasis>,
     pub subject_entity_id: ProgramEntityId,
     pub related_manifestation_ids: Vec<ManifestationId>,
     pub source_location: SourceLocation,
@@ -288,25 +290,54 @@ impl Resolution {
             Self::Partial | Self::Complete => target_count > 0,
         }
     }
+}
 
-    /// Complete resolution asserts a closed world at one call site: the
-    /// recorded targets are the only targets the site can invoke. A runtime
-    /// observation reports what one workload did, so it may support absent or
-    /// partial resolution but never completeness on its own.
-    pub fn requires_static_resolution_evidence(self) -> bool {
-        matches!(self, Self::Complete)
+/// A contributor's explicit declaration that it observed a closed world at one
+/// call site: `boundary` names the scope it observed, and `guarantee` states why
+/// no other target can exist within that boundary. Completeness is declared
+/// rather than inferred, so it stays independent of how the evidence was
+/// obtained.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompletenessBasis {
+    pub boundary: String,
+    pub guarantee: String,
+}
+
+impl CompletenessBasis {
+    pub(crate) fn validate(&self, subject: &str) -> Result<(), String> {
+        if self.boundary.trim().is_empty() || self.guarantee.trim().is_empty() {
+            return Err(format!(
+                "{subject} carries a completeness basis without both a boundary and a guarantee"
+            ));
+        }
+        Ok(())
     }
 }
 
-/// Shared wording for the one policy both the contributor seam and snapshot
-/// loading enforce, so a rejected contribution and a rejected export explain
-/// the same requirement.
-pub(crate) fn complete_resolution_evidence_error(subject: &str) -> String {
+/// Shared wording for the policy both the contributor seam and snapshot loading
+/// enforce, so a rejected contribution and a rejected export explain the same
+/// requirement.
+pub(crate) fn missing_completeness_basis_error(subject: &str) -> String {
     format!(
-        "{subject} declares Complete resolution without static-scoped resolution evidence; \
-         Complete resolution requires at least one call-site-resolution evidence record whose \
-         scope is Static, because runtime observation alone cannot establish that observed \
-         targets are the only possible targets"
+        "{subject} declares Complete resolution without a completeness basis; Complete \
+         resolution requires at least one call-site-resolution evidence record carrying a \
+         completeness basis that names the boundary the contributor observed and the guarantee \
+         that no other target exists within it"
+    )
+}
+
+pub(crate) fn contradictory_completeness_basis_error(subject: &str) -> String {
+    format!(
+        "{subject} carries a completeness basis without declaring Complete resolution; a \
+         completeness basis asserts a closed target set and contradicts Partial or Absent \
+         resolution"
+    )
+}
+
+pub(crate) fn misplaced_completeness_basis_error(subject: &str) -> String {
+    format!(
+        "{subject} carries a completeness basis on evidence that does not support a call-site \
+         resolution; only call-site-resolution evidence can close a target set"
     )
 }
 
@@ -827,6 +858,13 @@ impl PublishedSnapshot {
                     evidence.id
                 ));
             }
+            if let Some(basis) = &evidence.completeness_basis {
+                let subject = format!("evidence '{}'", evidence.id);
+                basis.validate(&subject)?;
+                if evidence.support != EvidenceSupport::CallSiteResolution {
+                    return Err(misplaced_completeness_basis_error(&subject));
+                }
+            }
             let evidence_context = contexts_by_id
                 .get(evidence.observation_context_id.as_str())
                 .expect("validated evidence context must exist");
@@ -1102,8 +1140,15 @@ impl PublishedSnapshot {
                         resolution.call_site_id, resolution.observation_context_id
                     )
                 })?;
-            let mut static_resolution_evidence = false;
+            let mut resolution_evidence_ids = BTreeSet::new();
+            let mut declared_completeness = false;
             for evidence_id in &resolution.evidence_ids {
+                if !resolution_evidence_ids.insert(evidence_id.as_str()) {
+                    return Err(format!(
+                        "resolution for '{}' references evidence '{evidence_id}' more than once",
+                        resolution.call_site_id
+                    ));
+                }
                 let evidence = evidence_by_id.get(evidence_id.as_str()).ok_or_else(|| {
                     format!(
                         "resolution for '{}' references unknown evidence '{evidence_id}'",
@@ -1122,15 +1167,17 @@ impl PublishedSnapshot {
                         resolution.call_site_id
                     ));
                 }
-                static_resolution_evidence |= evidence.scope == EvidenceScope::Static;
+                declared_completeness |= evidence.completeness_basis.is_some();
             }
-            if resolution.resolution.requires_static_resolution_evidence()
-                && !static_resolution_evidence
-            {
-                return Err(complete_resolution_evidence_error(&format!(
-                    "resolution for '{}'",
-                    resolution.call_site_id
-                )));
+            let subject = format!("resolution for '{}'", resolution.call_site_id);
+            match (resolution.resolution, declared_completeness) {
+                (Resolution::Complete, false) => {
+                    return Err(missing_completeness_basis_error(&subject));
+                }
+                (Resolution::Partial | Resolution::Absent, true) => {
+                    return Err(contradictory_completeness_basis_error(&subject));
+                }
+                _ => {}
             }
         }
         let claim_ids: BTreeSet<_> = self
@@ -1645,6 +1692,7 @@ pub(crate) fn publish(
                 evidence_type: call.evidence.evidence_type,
                 scope: call.evidence.scope,
                 support: call.evidence.support,
+                completeness_basis: call.evidence.completeness_basis,
                 subject_entity_id: call_site_id.clone(),
                 related_manifestation_ids: vec![caller.manifestation_id.clone()],
                 source_location: location.clone(),
@@ -1686,6 +1734,7 @@ pub(crate) fn publish(
                         evidence_type: evidence.evidence_type,
                         scope: evidence.scope,
                         support: evidence.support,
+                        completeness_basis: evidence.completeness_basis,
                         subject_entity_id: call_site_id.clone(),
                         related_manifestation_ids: vec![callee.manifestation_id.clone()],
                         source_location: location.clone(),

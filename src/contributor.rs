@@ -1,6 +1,7 @@
 use crate::snapshot::{
-    EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId, Resolution,
-    complete_resolution_evidence_error,
+    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId,
+    Resolution, contradictory_completeness_basis_error, misplaced_completeness_basis_error,
+    missing_completeness_basis_error,
 };
 use std::path::Path;
 
@@ -13,7 +14,9 @@ use std::path::Path;
 ///   callable identity per manifestation, and contribute first-class call sites
 ///   with per-site target-set resolution, typed evidence (scope and support),
 ///   and zero or more target claims. Indirect-call evidence became a declared
-///   capability.
+///   capability. Call-site-resolution evidence may carry a completeness basis,
+///   and complete resolution requires one; the seam is pre-stable, so this
+///   tightening of contract 2 is not a separate version.
 pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +63,9 @@ pub struct ContributedEvidence {
     pub evidence_type: String,
     pub scope: EvidenceScope,
     pub support: EvidenceSupport,
+    /// Present only when the contributor explicitly declares that it observed a
+    /// closed target set at this call site.
+    pub completeness_basis: Option<CompletenessBasis>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -261,10 +267,19 @@ impl EvidenceContribution {
                     call_site.resolution,
                 ));
             }
-            if call_site.resolution.requires_static_resolution_evidence()
-                && call_site.evidence.scope != EvidenceScope::Static
-            {
-                return Err(complete_resolution_evidence_error("contributed call site"));
+            match (
+                call_site.resolution,
+                call_site.evidence.completeness_basis.is_some(),
+            ) {
+                (Resolution::Complete, false) => {
+                    return Err(missing_completeness_basis_error("contributed call site"));
+                }
+                (Resolution::Partial | Resolution::Absent, true) => {
+                    return Err(contradictory_completeness_basis_error(
+                        "contributed call site",
+                    ));
+                }
+                _ => {}
             }
             if call_site.kind == ContributedCallKind::Direct
                 && (call_site.resolution != Resolution::Complete || contextual_target_count != 1)
@@ -320,6 +335,13 @@ impl ContributedEvidence {
                 "contributed {:?} evidence '{}' is incompatible with observation context '{}'",
                 self.scope, self.evidence_type, context.id
             ));
+        }
+        if let Some(basis) = &self.completeness_basis {
+            let subject = format!("contributed evidence '{}'", self.evidence_type);
+            basis.validate(&subject)?;
+            if self.support != EvidenceSupport::CallSiteResolution {
+                return Err(misplaced_completeness_basis_error(&subject));
+            }
         }
         Ok(())
     }
@@ -383,6 +405,10 @@ mod tests {
                     evidence_type: "static-call-site".into(),
                     scope: EvidenceScope::Static,
                     support: EvidenceSupport::CallSiteResolution,
+                    completeness_basis: Some(CompletenessBasis {
+                        boundary: "the call instruction".into(),
+                        guarantee: "a direct call names exactly one callee operand".into(),
+                    }),
                 },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "callee".into(),
@@ -393,6 +419,7 @@ mod tests {
                         evidence_type: "static-direct-call".into(),
                         scope: EvidenceScope::Static,
                         support: EvidenceSupport::TargetClaim,
+                        completeness_basis: None,
                     }],
                 }],
             }],
