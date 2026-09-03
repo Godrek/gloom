@@ -14,8 +14,9 @@ validates only a small part of that direction.
 - Ingest existing `.ll` files.
 - Extract direct calls and retain unresolved indirect calls explicitly. A call
   counts as direct only when its callee operand, after constant casts are
-  stripped, names a function, alias, or ifunc the module declares; a call
-  through a global variable stays unresolved.
+  stripped, names a callable the module declares: a function, an ifunc, or an
+  alias that resolves to one. A call through a global variable, or through an
+  alias to data, stays unresolved.
 - Merge definitions and declarations across inputs.
 - Detect recursive strongly connected components.
 - Query zero-incoming functions, reachability, and shortest call paths.

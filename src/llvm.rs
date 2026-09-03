@@ -6,7 +6,7 @@ use crate::contributor::{
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -29,6 +29,20 @@ struct ObservedFunction {
     pub defined: bool,
 }
 
+/// How a callable global is written in the module, kept as the representation
+/// of the manifestation contributed for it.
+const LLVM_FUNCTION: &str = "llvm-function";
+const LLVM_ALIAS: &str = "llvm-alias";
+const LLVM_IFUNC: &str = "llvm-ifunc";
+
+/// A callee named by a call site, with the kind of callable global it
+/// resolved to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedCallee {
+    pub name: String,
+    pub representation: &'static str,
+}
+
 /// What a call site's textual evidence says about its target.
 ///
 /// `Direct` is reserved for a callee operand that resolves to a callable the
@@ -36,7 +50,7 @@ struct ObservedFunction {
 /// evidence names no callable, so the call site's targets are unresolved.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObservedCallTarget {
-    Direct(String),
+    Direct(ObservedCallee),
     Indirect,
 }
 
@@ -48,9 +62,9 @@ struct ObservedCall {
 }
 
 /// A call site whose callee operand has been parsed but not yet resolved
-/// against the module's callable globals.
+/// against the module's declared globals.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct UnresolvedCall {
+struct PendingCall {
     pub caller: String,
     pub callee: CalleeOperand,
     pub line: usize,
@@ -122,7 +136,7 @@ impl EvidenceContributor for LlvmTextContributor {
                     contributor_callable_id: function.name.clone(),
                     display_name: function.name,
                     defined: function.defined,
-                    representation: "llvm-function".into(),
+                    representation: LLVM_FUNCTION.into(),
                     observation_context_id: context.id.clone(),
                 })
                 .collect(),
@@ -130,7 +144,7 @@ impl EvidenceContributor for LlvmTextContributor {
                 .calls
                 .into_iter()
                 .map(|call| match call.target {
-                    ObservedCallTarget::Direct(callee_display_name) => ContributedCallSite {
+                    ObservedCallTarget::Direct(callee) => ContributedCallSite {
                         kind: ContributedCallKind::Direct,
                         caller_callable_id: call.caller,
                         line: call.line,
@@ -142,9 +156,9 @@ impl EvidenceContributor for LlvmTextContributor {
                             support: EvidenceSupport::CallSiteResolution,
                         },
                         target_claims: vec![ContributedTargetClaim {
-                            target_callable_id: callee_display_name.clone(),
-                            callee_display_name,
-                            target_representation: "llvm-function".into(),
+                            target_callable_id: callee.name.clone(),
+                            callee_display_name: callee.name,
+                            target_representation: callee.representation.into(),
                             observation_context_id: context.id.clone(),
                             evidence: vec![ContributedEvidence {
                                 evidence_type: "static-direct-call".into(),
@@ -624,55 +638,142 @@ fn is_call_opcode(tokens: &[LlvmToken], index: usize) -> bool {
             .is_some_and(|token| token.kind == LlvmTokenKind::Colon)
 }
 
-/// Reports the callable global defined by a module-scope alias or ifunc, as in
+/// A module-scope global, kept by the kind that decides whether calling it
+/// names a callable.
+///
+/// Global variables are absent by design: an operand that names one, directly
+/// or through an alias, names no callable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DeclaredGlobal {
+    /// A `define` or `declare`.
+    Function,
+    /// An `alias`, which is callable only when its aliasee is.
+    Alias { aliasee: CalleeOperand },
+    /// An `ifunc`, whose resolver supplies the callee at load time.
+    IFunc,
+}
+
+/// Reports the alias or ifunc a module-scope definition introduces, as in
 /// `@aliased = alias void (), ptr @aliasee`.
 ///
-/// Aliases and ifuncs are callable globals that no `define` or `declare`
-/// introduces, so a call through one still names a callable. The keyword is
-/// searched for only across the words between the global's name and the first
-/// non-word token, which keeps unrelated globals and their initialisers out.
-fn aliased_callable(tokens: &[LlvmToken], index: usize) -> Option<&str> {
+/// Aliases and ifuncs are globals that no `define` or `declare` introduces, so
+/// they are collected separately. The keyword is searched for only across the
+/// words between the global's name and the first non-word token, which keeps
+/// unrelated globals and their initialisers out.
+fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredGlobal)> {
     let LlvmTokenKind::Global(name) = &tokens[index].kind else {
         return None;
     };
-    tokens[index + 1..]
+    let (offset, keyword) = tokens[index + 1..]
         .iter()
-        .take_while(|token| matches!(&token.kind, LlvmTokenKind::Word(_)))
-        .any(|token| matches!(&token.kind, LlvmTokenKind::Word(word) if word == "alias" || word == "ifunc"))
-        .then_some(name.as_str())
+        .enumerate()
+        .take_while(|(_, token)| matches!(&token.kind, LlvmTokenKind::Word(_)))
+        .find(|(_, token)| {
+            matches!(&token.kind, LlvmTokenKind::Word(word) if word == "alias" || word == "ifunc")
+        })?;
+    let declaration = match &keyword.kind {
+        LlvmTokenKind::Word(word) if word == "ifunc" => DeclaredGlobal::IFunc,
+        _ => DeclaredGlobal::Alias {
+            aliasee: alias_aliasee(tokens, index + 1 + offset),
+        },
+    };
+    Some((name.as_str(), declaration))
 }
 
-/// Classifies a parsed callee operand against the module's callable globals.
+/// The aliasee of an alias definition: the first global or constant cast after
+/// the `alias` keyword.
 ///
-/// A global names a direct target only when the module declares, defines, or
-/// aliases it as a callable. A call through a global variable, such as
-/// `@fp = external global ptr` followed by `call void @fp()`, is valid IR that
-/// names no callable, so it stays an indirect call site rather than becoming a
-/// claimed target named after the variable.
+/// An alias is written on one line, so the search stops at the end of the
+/// keyword's line rather than running into the next module-scope definition.
+/// An aliasee this does not recognise stays `Unnamed`, which keeps the alias
+/// out of the callable globals instead of guessing at a target.
+fn alias_aliasee(tokens: &[LlvmToken], keyword: usize) -> CalleeOperand {
+    let line = tokens[keyword].line;
+    for index in keyword + 1..tokens.len() {
+        if tokens[index].line != line {
+            break;
+        }
+        match &tokens[index].kind {
+            LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
+            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
+                return cast_callee_operand(tokens, index);
+            }
+            _ => {}
+        }
+    }
+    CalleeOperand::Unnamed
+}
+
+/// Classifies a parsed callee operand against the module's declared globals.
+///
+/// A global names a direct target only when it identifies a callable: a
+/// function, an ifunc, or an alias whose chain of aliasees reaches one. A call
+/// through a global variable, such as `@fp = external global ptr` followed by
+/// `call void @fp()`, and a call through an alias to data are both valid IR
+/// that names no callable, so they stay indirect call sites rather than
+/// becoming claimed targets named after the global.
 fn resolve_callee(
     callee: CalleeOperand,
-    callable_globals: &BTreeSet<String>,
+    declarations: &BTreeMap<String, DeclaredGlobal>,
 ) -> ObservedCallTarget {
     match callee {
-        CalleeOperand::Global(name) if callable_globals.contains(&name) => {
-            ObservedCallTarget::Direct(name)
+        CalleeOperand::Global(name) => match callable_representation(&name, declarations) {
+            Some(representation) => ObservedCallTarget::Direct(ObservedCallee {
+                name,
+                representation,
+            }),
+            None => ObservedCallTarget::Indirect,
+        },
+        CalleeOperand::Unnamed => ObservedCallTarget::Indirect,
+    }
+}
+
+/// Reports how a callable global named at a call site is written, or `None`
+/// when the name identifies no callable.
+///
+/// The representation describes the named global itself, while the alias chain
+/// is followed only to decide whether it is callable at all. A chain that
+/// reaches a global the module never declares, an aliasee the parse could not
+/// name, or a cycle is not callable.
+fn callable_representation(
+    name: &str,
+    declarations: &BTreeMap<String, DeclaredGlobal>,
+) -> Option<&'static str> {
+    let representation = match declarations.get(name)? {
+        DeclaredGlobal::Function => LLVM_FUNCTION,
+        DeclaredGlobal::Alias { .. } => LLVM_ALIAS,
+        DeclaredGlobal::IFunc => LLVM_IFUNC,
+    };
+    let mut visited = BTreeSet::new();
+    let mut current = name.to_owned();
+    loop {
+        if !visited.insert(current.clone()) {
+            return None;
         }
-        _ => ObservedCallTarget::Indirect,
+        match declarations.get(&current)? {
+            DeclaredGlobal::Function | DeclaredGlobal::IFunc => return Some(representation),
+            DeclaredGlobal::Alias {
+                aliasee: CalleeOperand::Global(aliasee),
+            } => current = aliasee.clone(),
+            DeclaredGlobal::Alias {
+                aliasee: CalleeOperand::Unnamed,
+            } => return None,
+        }
     }
 }
 
 fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     let tokens = tokenize_llvm_ir(text)?;
     let mut observations = LlvmObservations::default();
-    let mut callable_globals = BTreeSet::new();
-    let mut unresolved_calls: Vec<UnresolvedCall> = Vec::new();
+    let mut declarations: BTreeMap<String, DeclaredGlobal> = BTreeMap::new();
+    let mut pending_calls: Vec<PendingCall> = Vec::new();
     let mut current = None;
     let mut body_end = 0_usize;
     let mut index = 0;
     while index < tokens.len() {
         if current.is_none() {
-            if let Some(name) = aliased_callable(&tokens, index) {
-                callable_globals.insert(name.to_owned());
+            if let Some((name, declaration)) = declared_alias(&tokens, index) {
+                declarations.insert(name.to_owned(), declaration);
                 index += 1;
                 continue;
             }
@@ -695,7 +796,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
             let LlvmTokenKind::Global(name) = &tokens[name_index].kind else {
                 unreachable!()
             };
-            callable_globals.insert(name.clone());
+            declarations.insert(name.clone(), DeclaredGlobal::Function);
             observations.functions.push(ObservedFunction {
                 name: name.clone(),
                 defined,
@@ -719,7 +820,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
         } else if is_call_opcode(&tokens, index)
             && let Some(callee) = call_callee_operand(&tokens[..body_end], index)
         {
-            unresolved_calls.push(UnresolvedCall {
+            pending_calls.push(PendingCall {
                 caller: current.clone().expect("function body must have a caller"),
                 callee,
                 line: tokens[index].line,
@@ -729,10 +830,12 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     }
 
     // Callee operands are resolved after the whole module has been observed:
-    // textual LLVM IR may declare a called function after the call site.
-    for call in unresolved_calls {
-        let target = resolve_callee(call.callee, &callable_globals);
-        if matches!(&target, ObservedCallTarget::Direct(name) if name.starts_with("llvm.")) {
+    // textual LLVM IR may declare a called function, or the aliasee an alias
+    // points at, after the call site.
+    for call in pending_calls {
+        let target = resolve_callee(call.callee, &declarations);
+        if matches!(&target, ObservedCallTarget::Direct(callee) if callee.name.starts_with("llvm."))
+        {
             continue;
         }
         observations.calls.push(ObservedCall {
@@ -760,8 +863,8 @@ pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> 
     for call in observations.calls {
         match call.target {
             ObservedCallTarget::Direct(callee) => {
-                graph.add_node(Node::function(&callee, false, None));
-                graph.add_edge(&call.caller, &callee, "direct-call");
+                graph.add_node(Node::function(&callee.name, false, None));
+                graph.add_edge(&call.caller, &callee.name, "direct-call");
             }
             ObservedCallTarget::Indirect => {
                 graph.add_node(Node {
@@ -873,29 +976,48 @@ define i32 @"odd.name"(i32 %n) {
         )));
     }
 
+    /// Aliases forming a cycle are rejected by LLVM itself, so this text is
+    /// deliberately beyond what a real module can contain: the parse must stay
+    /// conservative on hand-written input rather than loop.
     const CALLEE_OPERAND_IR: &str = r#"
 @handler = external global ptr
+@data = global i8 0
+@data_alias = alias i8, ptr @data
+@function_alias = alias void (), ptr @declared_target
+@cycle = alias void (), ptr @other_cycle
+@other_cycle = alias void (), ptr @cycle
 define void @caller() {
   call void @handler()
   call void bitcast (void (...)* @declared_target to void ()*)()
+  call void @data_alias()
+  call void @function_alias()
+  call void @cycle()
   ret void
 }
 declare void @declared_target()"#;
 
     #[test]
-    fn resolves_callee_operands_against_the_module_callables() {
+    fn resolves_callee_operands_against_the_module_declarations() {
         let graph = parse_llvm_ir(CALLEE_OPERAND_IR, Some("fixture.ll")).unwrap();
-        assert!(!graph.nodes.contains_key("handler"));
+        for uncallable in ["handler", "data", "data_alias", "cycle", "other_cycle"] {
+            assert!(!graph.nodes.contains_key(uncallable));
+        }
         assert!(graph.edges.contains_key(&(
             "caller".into(),
             "<indirect>".into(),
             "indirect-call".into()
         )));
-        assert!(graph.edges.contains_key(&(
-            "caller".into(),
-            "declared_target".into(),
-            "direct-call".into()
-        )));
+        for callable in ["declared_target", "function_alias"] {
+            assert!(graph.edges.contains_key(&(
+                "caller".into(),
+                callable.into(),
+                "direct-call".into()
+            )));
+        }
+        assert_eq!(
+            graph.edges[&("caller".into(), "<indirect>".into(), "indirect-call".into())].call_count,
+            3
+        );
     }
 
     #[test]
