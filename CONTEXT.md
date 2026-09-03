@@ -53,7 +53,7 @@ Whether an evidence record describes static program structure or an observed run
 _Avoid_: Evidence kind, confidence level
 
 **Evidence support**:
-What an evidence record supports: a call site's target-set resolution or one target claim. Support keeps resolution evidence and target evidence from being substituted for one another.
+What an evidence record supports: a call site's target-set resolution, one target claim, or the contributor callable identity of one manifestation. Support keeps resolution evidence, target evidence, and identity evidence from being substituted for one another.
 _Avoid_: Evidence role, edge weight
 
 **Evidence provenance**:

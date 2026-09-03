@@ -81,6 +81,9 @@ fn callable(
     name: &str,
     representation: &str,
     observation_context_id: &ObservationContextId,
+    scope: EvidenceScope,
+    evidence_artifact: &str,
+    line: usize,
 ) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: name.into(),
@@ -88,6 +91,16 @@ fn callable(
         defined: true,
         representation: representation.into(),
         observation_context_id: observation_context_id.clone(),
+        line,
+        // Identity evidence is read where the callable is declared: the same
+        // acquired input, at the callable's own line.
+        identity_evidence: evidence(
+            "contributed-callable-identity",
+            scope,
+            EvidenceSupport::ContributorIdentity,
+            evidence_artifact,
+            line,
+        ),
     }
 }
 
@@ -128,8 +141,22 @@ fn static_contribution(input: &Path, context: &ObservationContext) -> EvidenceCo
         input: contributed_input(input, "semantic-fixture", STATIC_FINGERPRINT),
         observation_contexts: vec![context.clone()],
         callables: vec![
-            callable("dispatch", "fixture-callable", &context.id),
-            callable("first_target", "fixture-callable", &context.id),
+            callable(
+                "dispatch",
+                "fixture-callable",
+                &context.id,
+                EvidenceScope::Static,
+                &artifact,
+                1,
+            ),
+            callable(
+                "first_target",
+                "fixture-callable",
+                &context.id,
+                EvidenceScope::Static,
+                &artifact,
+                2,
+            ),
         ],
         call_sites: vec![ContributedCallSite {
             contributor_call_site_id: ContributorCallSiteId::new(CALL_SITE_IDENTITY).unwrap(),
@@ -198,8 +225,22 @@ impl StaticAndTraceFixture {
             input: contributed_input(input, "runtime-trace", TRACE_FINGERPRINT),
             observation_contexts: vec![context.clone(), runtime.clone()],
             callables: vec![
-                callable("first_target", "traced-callable", &runtime.id),
-                callable("second_target", "traced-callable", &runtime.id),
+                callable(
+                    "first_target",
+                    "traced-callable",
+                    &runtime.id,
+                    EvidenceScope::Runtime,
+                    &artifact,
+                    11,
+                ),
+                callable(
+                    "second_target",
+                    "traced-callable",
+                    &runtime.id,
+                    EvidenceScope::Runtime,
+                    &artifact,
+                    12,
+                ),
             ],
             call_sites: Vec::new(),
             call_site_attachments: vec![ContributedCallSiteAttachment {
@@ -331,7 +372,14 @@ impl EvidenceContributor for LlvmAndTraceFixture {
         Ok(EvidenceContribution {
             input: contributed_input(input, "runtime-trace", TRACE_FINGERPRINT),
             observation_contexts: vec![context.clone(), runtime.clone()],
-            callables: vec![callable("traced_callee", "traced-callable", &runtime.id)],
+            callables: vec![callable(
+                "traced_callee",
+                "traced-callable",
+                &runtime.id,
+                EvidenceScope::Runtime,
+                &artifact,
+                11,
+            )],
             call_sites: Vec::new(),
             call_site_attachments: vec![ContributedCallSiteAttachment {
                 call_site: ContributedCallSiteReference {
@@ -769,7 +817,9 @@ fn hand_edited_evidence_provenance_is_rejected_on_load() {
     );
 
     // (b) Reassigning the call site's own resolution evidence to the trace
-    // input does not escape the location check either.
+    // input does not escape provenance checking either: the caller
+    // manifestation the record relates stays in the input that published the
+    // call site, and evidence never spans acquired inputs.
     let resolution_evidence_index = exported["evidence_records"]
         .as_array()
         .unwrap()
@@ -796,7 +846,7 @@ fn hand_edited_evidence_provenance_is_rejected_on_load() {
     );
     let error = load(&reassigned_resolution_evidence);
     assert!(
-        error.contains("disagree about the call-site location"),
+        error.contains("were read from different acquired inputs"),
         "unexpected error: {error}"
     );
 

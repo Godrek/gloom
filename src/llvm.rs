@@ -26,6 +26,7 @@ struct AcquiredLlvmIr {
 struct ObservedFunction {
     pub name: String,
     pub defined: bool,
+    pub line: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,6 +111,16 @@ impl EvidenceContributor for LlvmTextContributor {
                     defined: function.defined,
                     representation: "llvm-function".into(),
                     observation_context_id: context.id.clone(),
+                    line: function.line,
+                    identity_evidence: ContributedEvidence {
+                        evidence_type: "static-callable-identity".into(),
+                        scope: EvidenceScope::Static,
+                        support: EvidenceSupport::ContributorIdentity,
+                        location: ContributedEvidenceLocation {
+                            evidence_artifact: artifact.clone(),
+                            line: function.line,
+                        },
+                    },
                 })
                 .collect(),
             call_sites: observations
@@ -552,6 +563,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
             observations.functions.push(ObservedFunction {
                 name: name.clone(),
                 defined,
+                line: tokens[index].line,
             });
             let signature_end = function_signature_end(&tokens, name_index).ok_or_else(|| {
                 format!("LLVM function '{name}' has an incomplete parameter list")

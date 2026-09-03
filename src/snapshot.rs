@@ -265,11 +265,19 @@ impl EvidenceScope {
     }
 }
 
+/// What an evidence record supports.
+///
+/// The subject entity of a record follows from its support: resolution and
+/// target evidence describe a call site, so their subject is that call site,
+/// while contributor-identity evidence describes one callable manifestation,
+/// so its subject is the callable entity that manifestation represents and its
+/// related manifestation is that manifestation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvidenceSupport {
     CallSiteResolution,
     TargetClaim,
+    ContributorIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -319,8 +327,11 @@ pub const CONTRIBUTED_EVIDENCE_TARGET_RULE: &str = "call-target-from-contributed
 /// asserts one contributor callable identity for a callable in each of its
 /// observation contexts; when that identity appears in more than one context
 /// of the same acquired input, the manifestations correspond. Display names
-/// never participate, and the claim cites the evidence that placed each
-/// manifestation in its context so the derivation can be recomputed.
+/// never participate, and the claim cites only the contributor-identity
+/// evidence for each of its manifestations, never resolution or target
+/// evidence, so the derivation can be recomputed. A manifestation without
+/// identity evidence takes no part in the claim, and the claim is not derived
+/// at all when fewer than two manifestations remain.
 pub const CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE: &str =
     "correspondence-from-contributor-callable-identity";
 
@@ -430,6 +441,15 @@ pub struct PublishedSnapshot {
     correspondence_claims: Vec<CorrespondenceClaim>,
     derivations: Vec<Derivation>,
     call_graph_projection: CallGraphProjection,
+}
+
+/// The contributor-identity evidence a snapshot publishes for one contributor
+/// callable identity within one acquired input.
+#[derive(Default)]
+struct IdentityEvidenceGroup<'a> {
+    manifestation_ids: BTreeSet<&'a str>,
+    evidence_ids: BTreeSet<&'a str>,
+    observation_context_ids: BTreeSet<&'a str>,
 }
 
 impl PublishedSnapshot {
@@ -619,6 +639,56 @@ impl PublishedSnapshot {
             evidence_records,
             derivations,
         })
+    }
+
+    /// Groups this snapshot's contributor-identity evidence by the acquired
+    /// input and contributor callable identity it asserts, rejecting a
+    /// manifestation asserted more than once.
+    ///
+    /// Validation recomputes correspondence claims from these groups, so a
+    /// hand-edited claim can neither cite identity evidence for another
+    /// callable, nor drop a manifestation whose identity evidence remains, nor
+    /// disappear while its group still spans observation contexts.
+    fn identity_evidence_groups(
+        &self,
+    ) -> Result<BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>>, String> {
+        let manifestations_by_id: BTreeMap<_, _> = self
+            .manifestations
+            .iter()
+            .map(|manifestation| (manifestation.id.as_str(), manifestation))
+            .collect();
+        let mut groups: BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>> = BTreeMap::new();
+        let mut asserted_manifestations = BTreeSet::new();
+        for evidence in self
+            .evidence_records
+            .iter()
+            .filter(|evidence| evidence.support == EvidenceSupport::ContributorIdentity)
+        {
+            let manifestation_id = evidence
+                .related_manifestation_ids
+                .first()
+                .expect("validated contributor-identity evidence relates one manifestation");
+            if !asserted_manifestations.insert(manifestation_id.as_str()) {
+                return Err(format!(
+                    "manifestation '{manifestation_id}' has more than one contributor-identity evidence record"
+                ));
+            }
+            let manifestation = manifestations_by_id
+                .get(manifestation_id.as_str())
+                .expect("validated contributor-identity evidence manifestation must exist");
+            let group = groups
+                .entry((
+                    manifestation.acquired_input_id.as_str(),
+                    manifestation.contributor_callable_id.as_str(),
+                ))
+                .or_default();
+            group.manifestation_ids.insert(manifestation_id.as_str());
+            group.evidence_ids.insert(evidence.id.as_str());
+            group
+                .observation_context_ids
+                .insert(manifestation.observation_context_id.as_str());
+        }
+        Ok(groups)
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -881,12 +951,6 @@ impl PublishedSnapshot {
                         evidence.id, evidence.subject_entity_id
                     )
                 })?;
-            if subject.kind != ProgramEntityKind::CallSite {
-                return Err(format!(
-                    "evidence record '{}' does not identify a call site",
-                    evidence.id
-                ));
-            }
             if evidence.source_location.input_id != evidence.acquired_input_id {
                 return Err(format!(
                     "evidence '{}' has a source location in another acquired input",
@@ -905,6 +969,11 @@ impl PublishedSnapshot {
                     evidence.id
                 ));
             }
+            // Evidence records the provenance its contributor observed: the
+            // acquired input it read and the line within that input's evidence
+            // artifact. That input need not be the one that published the call
+            // site, so runtime evidence acquired from a trace keeps the trace's
+            // input and line instead of inheriting the static call site's.
             if !identity_belongs_to_acquired_input(
                 evidence.id.as_str(),
                 "evidence",
@@ -915,33 +984,6 @@ impl PublishedSnapshot {
                 return Err(format!(
                     "evidence '{}' was not published from acquired input '{}'",
                     evidence.id, evidence.acquired_input_id
-                ));
-            }
-            // Evidence records the provenance its contributor observed: the
-            // acquired input it read and the line within that input's evidence
-            // artifact. That input need not be the one that published the call
-            // site, so runtime evidence acquired from a trace keeps the trace's
-            // input and line instead of inheriting the static call site's.
-            //
-            // A call site's target-set resolution is asserted only by the
-            // contribution that published the site, so resolution evidence is a
-            // statement about that site read in that same acquired input and
-            // must agree with where the site is. Target evidence may come from
-            // any acquired input, but is bound to the manifestation it names:
-            // an evidence record and the manifestations it relates are always
-            // read from the same acquired input, which is what stops a
-            // hand-edited export from re-attributing a trace's observation to a
-            // static artifact.
-            let call_site_location = subject
-                .source_location
-                .as_ref()
-                .expect("validated call site must carry a source location");
-            if evidence.support == EvidenceSupport::CallSiteResolution
-                && evidence.source_location != *call_site_location
-            {
-                return Err(format!(
-                    "evidence '{}' and call site '{}' disagree about the call-site location",
-                    evidence.id, subject.id
                 ));
             }
             for manifestation_id in &evidence.related_manifestation_ids {
@@ -966,7 +1008,61 @@ impl PublishedSnapshot {
                     ));
                 }
             }
+            match evidence.support {
+                EvidenceSupport::CallSiteResolution | EvidenceSupport::TargetClaim => {
+                    if subject.kind != ProgramEntityKind::CallSite {
+                        return Err(format!(
+                            "evidence record '{}' does not identify a call site",
+                            evidence.id
+                        ));
+                    }
+                    // A call site's target-set resolution is asserted only by
+                    // the contribution that published the site, so resolution
+                    // evidence is a statement about that site, read in the same
+                    // acquired input, and must agree with where the site is. A
+                    // target claim may be acquired later from another input and
+                    // keeps its own provenance; it is bound instead to the
+                    // manifestation it names, which is always read from the
+                    // same acquired input as the evidence itself.
+                    if evidence.support == EvidenceSupport::CallSiteResolution
+                        && subject.source_location.as_ref() != Some(&evidence.source_location)
+                    {
+                        return Err(format!(
+                            "evidence '{}' and call site '{}' disagree about the call-site location",
+                            evidence.id, subject.id
+                        ));
+                    }
+                }
+                EvidenceSupport::ContributorIdentity => {
+                    if subject.kind != ProgramEntityKind::Callable {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' does not identify a callable",
+                            evidence.id
+                        ));
+                    }
+                    let identified = match evidence.related_manifestation_ids.as_slice() {
+                        [manifestation_id] => manifestations_by_id
+                            .get(manifestation_id.as_str())
+                            .expect("validated related manifestation must exist"),
+                        _ => {
+                            return Err(format!(
+                                "contributor-identity evidence '{}' must relate exactly one manifestation",
+                                evidence.id
+                            ));
+                        }
+                    };
+                    if identified.entity_id != evidence.subject_entity_id
+                        || identified.acquired_input_id != evidence.acquired_input_id
+                    {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' does not describe a manifestation of its subject callable",
+                            evidence.id
+                        ));
+                    }
+                }
+            }
         }
+        let identity_groups = self.identity_evidence_groups()?;
         let correspondence_claims_by_id: BTreeMap<_, _> = self
             .correspondence_claims
             .iter()
@@ -1078,6 +1174,12 @@ impl PublishedSnapshot {
                         claim.id, evidence_id
                     )
                 })?;
+                if evidence.support != EvidenceSupport::ContributorIdentity {
+                    return Err(format!(
+                        "correspondence claim '{}' cites evidence '{}' with {:?} support instead of contributor-identity support",
+                        claim.id, evidence.id, evidence.support
+                    ));
+                }
                 if evidence.acquired_input_id != claim.acquired_input_id {
                     return Err(format!(
                         "correspondence claim '{}' and its evidence use different acquired inputs",
@@ -1096,6 +1198,58 @@ impl PublishedSnapshot {
                 return Err(format!(
                     "correspondence claim '{}' lacks evidence for every manifestation",
                     claim.id
+                ));
+            }
+        }
+        for claim in &self.correspondence_claims {
+            let group = identity_groups
+                .get(&(
+                    claim.acquired_input_id.as_str(),
+                    claim.contributor_callable_id.as_str(),
+                ))
+                .filter(|group| group.observation_context_ids.len() > 1)
+                .ok_or_else(|| {
+                    format!(
+                        "correspondence claim '{}' is not derived from contributor-identity evidence spanning observation contexts",
+                        claim.id
+                    )
+                })?;
+            if claim
+                .manifestation_ids
+                .iter()
+                .map(ManifestationId::as_str)
+                .collect::<BTreeSet<_>>()
+                != group.manifestation_ids
+            {
+                return Err(format!(
+                    "correspondence claim '{}' does not identify every manifestation its contributor-identity evidence asserts",
+                    claim.id
+                ));
+            }
+            if claim
+                .evidence_ids
+                .iter()
+                .map(EvidenceId::as_str)
+                .collect::<BTreeSet<_>>()
+                != group.evidence_ids
+            {
+                return Err(format!(
+                    "correspondence claim '{}' does not cite exactly the contributor-identity evidence for its manifestations",
+                    claim.id
+                ));
+            }
+        }
+        for ((acquired_input_id, contributor_callable_id), group) in &identity_groups {
+            if group.observation_context_ids.len() < 2 {
+                continue;
+            }
+            if !self.correspondence_claims.iter().any(|claim| {
+                claim.acquired_input_id.as_str() == *acquired_input_id
+                    && claim.contributor_callable_id == *contributor_callable_id
+            }) {
+                return Err(format!(
+                    "contributor callable identity '{contributor_callable_id}' has contributor-identity evidence in {} observation contexts of acquired input '{acquired_input_id}' but no correspondence claim",
+                    group.observation_context_ids.len()
                 ));
             }
         }
@@ -1752,8 +1906,8 @@ pub(crate) fn publish(
         });
 
         let mut identities = BTreeMap::new();
-        for function in contribution.callables {
-            ensure_callable(
+        for (callable_index, function) in contribution.callables.into_iter().enumerate() {
+            let callable = ensure_callable(
                 &function.contributor_callable_id,
                 &function.display_name,
                 &function.representation,
@@ -1766,6 +1920,21 @@ pub(crate) fn publish(
                 &mut program_entities,
                 &mut manifestations,
             )?;
+            evidence_records.push(contributed_evidence_record(
+                EvidenceId::new(format!(
+                    "evidence:{snapshot_id}:input:{input_index}:callable-identity:{callable_index}"
+                )),
+                function.identity_evidence,
+                &function.observation_context_id,
+                &callable.entity_id,
+                vec![callable.manifestation_id],
+                &input_id,
+                &evidence_artifact,
+                format!(
+                    "contributed evidence asserts contributor callable identity '{}' for this manifestation",
+                    function.contributor_callable_id
+                ),
+            ));
         }
 
         for (contributed_index, contributed) in contribution
@@ -2051,13 +2220,16 @@ pub(crate) fn publish(
         );
     }
 
-    let mut evidence_ids_by_manifestation: BTreeMap<
+    let mut identity_evidence_by_manifestation: BTreeMap<
         (&AcquiredInputId, &ManifestationId),
         Vec<&EvidenceId>,
     > = BTreeMap::new();
     for evidence in &evidence_records {
+        if evidence.support != EvidenceSupport::ContributorIdentity {
+            continue;
+        }
         for manifestation_id in &evidence.related_manifestation_ids {
-            evidence_ids_by_manifestation
+            identity_evidence_by_manifestation
                 .entry((&evidence.acquired_input_id, manifestation_id))
                 .or_default()
                 .push(&evidence.id);
@@ -2070,8 +2242,8 @@ pub(crate) fn publish(
             .manifestation_ids
             .into_iter()
             .filter(|manifestation_id| {
-                let Some(related) =
-                    evidence_ids_by_manifestation.get(&(&seed.acquired_input_id, manifestation_id))
+                let Some(related) = identity_evidence_by_manifestation
+                    .get(&(&seed.acquired_input_id, manifestation_id))
                 else {
                     return false;
                 };

@@ -14,17 +14,20 @@ use std::path::Path;
 ///   with per-site target-set resolution, typed evidence (scope and support),
 ///   and zero or more target claims. Indirect-call evidence became a declared
 ///   capability.
-/// - `3`: every contributed evidence record carries its own provenance, the
+/// - `3`: contributors emit one contributor-identity evidence record per
+///   contributed callable manifestation, located in the evidence artifact.
+///   Correspondence claims are derived from that identity evidence alone.
+/// - `4`: every contributed evidence record carries its own provenance, the
 ///   evidence artifact it was read in plus the line it was read at, instead of
-///   inheriting the enclosing call site's input and location. Contributors
-///   also assert a contributor call-site identity for each contributed call
-///   site, so a later acquired input can attach target claims to an
-///   already-published call site instead of publishing a second call-site
-///   entity. Such a reference names the observation context, the acquired
-///   input's content fingerprint, the caller's contributor callable identity,
-///   and the call-site identity; a call site's target-set resolution stays as
-///   the contribution that published it asserted.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
+///   inheriting the location of the call site or callable it supports.
+///   Contributors also assert a contributor call-site identity for each
+///   contributed call site, so a later acquired input can attach target claims
+///   to an already-published call site instead of publishing a second
+///   call-site entity. Such a reference names the observation context, the
+///   acquired input's content fingerprint, the caller's contributor callable
+///   identity, and the call-site identity; a call site's target-set resolution
+///   stays as the contribution that published it asserted.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "4";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -50,6 +53,19 @@ pub struct ContributedInput {
     pub content_fingerprint: String,
 }
 
+/// One callable manifestation a contributor asserts in one of its observation
+/// contexts.
+///
+/// `identity_evidence` is the contributor's account of that assertion: exactly
+/// one [`EvidenceSupport::ContributorIdentity`] record per contributed
+/// callable, located at `line` in the contributed evidence artifact. A
+/// contribution declares each identity at most once per observation context,
+/// so one contributed callable is one manifestation and one identity record.
+///
+/// Identity evidence is the only evidence from which the core derives
+/// correspondence claims, so a manifestation a contribution never declares
+/// here, one introduced only by a target claim, can take part in no
+/// correspondence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallable {
     pub contributor_callable_id: String,
@@ -57,6 +73,8 @@ pub struct ContributedCallable {
     pub defined: bool,
     pub representation: String,
     pub observation_context_id: ObservationContextId,
+    pub line: usize,
+    pub identity_evidence: ContributedEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,7 +287,8 @@ impl EvidenceContribution {
                 ));
             }
         }
-        let mut callable_identities = std::collections::BTreeMap::new();
+        let artifact = self.input.evidence_artifact.as_str();
+        let mut callable_identities = std::collections::BTreeSet::new();
         for callable in &self.callables {
             if callable.contributor_callable_id.trim().is_empty()
                 || callable.display_name.is_empty()
@@ -286,22 +305,40 @@ impl EvidenceContribution {
                     callable.observation_context_id
                 ));
             }
-            let identity = (
+            if callable.line == 0 {
+                return Err(format!(
+                    "contributed callable '{}' has no identity-evidence line",
+                    callable.contributor_callable_id
+                ));
+            }
+            callable.identity_evidence.validate(
+                contexts_by_id
+                    .get(callable.observation_context_id.as_str())
+                    .expect("contributed callable context must exist"),
+                EvidenceSupport::ContributorIdentity,
+                artifact,
+            )?;
+            // Identity evidence is the contributor's account of declaring this
+            // callable, so it is read where the declaration is: the same
+            // acquired input, at the callable's own line.
+            if callable.identity_evidence.location.line != callable.line {
+                return Err(format!(
+                    "contributed identity evidence at line {} does not locate callable '{}' at line {}",
+                    callable.identity_evidence.location.line,
+                    callable.contributor_callable_id,
+                    callable.line
+                ));
+            }
+            if !callable_identities.insert((
                 callable.observation_context_id.as_str(),
                 callable.contributor_callable_id.as_str(),
-            );
-            if let Some(existing) = callable_identities.insert(identity, callable) {
-                if existing.display_name != callable.display_name
-                    || existing.representation != callable.representation
-                {
-                    return Err(format!(
-                        "contributed callable identity '{}' has conflicting labels or representations in observation context '{}'",
-                        callable.contributor_callable_id, callable.observation_context_id
-                    ));
-                }
+            )) {
+                return Err(format!(
+                    "contributed callable identity '{}' has duplicate contributions in observation context '{}'",
+                    callable.contributor_callable_id, callable.observation_context_id
+                ));
             }
         }
-        let artifact = self.input.evidence_artifact.as_str();
         let mut call_site_identities = std::collections::BTreeSet::new();
         for call_site in &self.call_sites {
             if call_site.caller_callable_id.trim().is_empty() || call_site.line == 0 {
@@ -349,7 +386,7 @@ impl EvidenceContribution {
                     call_site.evidence.location.line, call_site.line
                 ));
             }
-            if !callable_identities.contains_key(&(
+            if !callable_identities.contains(&(
                 call_site.observation_context_id.as_str(),
                 call_site.caller_callable_id.as_str(),
             )) {
@@ -528,6 +565,16 @@ mod tests {
                 defined: true,
                 representation: "fixture-callable".into(),
                 observation_context_id: context.id.clone(),
+                line: 1,
+                identity_evidence: ContributedEvidence {
+                    evidence_type: "static-callable-identity".into(),
+                    scope: EvidenceScope::Static,
+                    support: EvidenceSupport::ContributorIdentity,
+                    location: ContributedEvidenceLocation {
+                        evidence_artifact: "fixture".into(),
+                        line: 1,
+                    },
+                },
             }],
             call_sites: vec![ContributedCallSite {
                 contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
