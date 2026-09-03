@@ -217,6 +217,9 @@ enum LlvmTokenKind {
     /// The `=` of a module-scope definition or a local assignment. It marks
     /// where one module-scope definition ends and the next begins.
     Equals,
+    /// The `,` that separates a definition's operands, such as an alias's type
+    /// from its aliasee.
+    Comma,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -356,6 +359,13 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
             b'=' => {
                 tokens.push(LlvmToken {
                     kind: LlvmTokenKind::Equals,
+                    line,
+                });
+                index += 1;
+            }
+            b',' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::Comma,
                     line,
                 });
                 index += 1;
@@ -702,14 +712,20 @@ fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredG
 
 /// Finds where the module-scope definition containing `start` ends.
 ///
-/// Every module-scope definition but `define` and `declare` is introduced by a
-/// name and an `=`, so the next such pair, or the next function, bounds the
-/// current one. Definitions are bounded by tokens rather than by lines: an
-/// alias may be written across several lines.
+/// Most module-scope definitions are introduced by a name and an `=`, so the
+/// next such pair bounds the current one; the rest are introduced by their own
+/// keyword. Definitions are bounded by tokens rather than by lines: an alias
+/// may be written across several lines.
 fn module_definition_end(tokens: &[LlvmToken], start: usize) -> usize {
     (start..tokens.len())
         .find(|index| {
-            matches!(&tokens[*index].kind, LlvmTokenKind::Word(word) if word == "define" || word == "declare")
+            matches!(&tokens[*index].kind,
+            LlvmTokenKind::Word(word)
+                if matches!(
+                    word.as_str(),
+                    "define" | "declare" | "attributes" | "module" | "uselistorder"
+                ))
+                || matches!(&tokens[*index].kind, LlvmTokenKind::Metadata)
                 || tokens
                     .get(index + 1)
                     .is_some_and(|token| token.kind == LlvmTokenKind::Equals)
@@ -717,33 +733,67 @@ fn module_definition_end(tokens: &[LlvmToken], start: usize) -> usize {
         .unwrap_or(tokens.len())
 }
 
-/// The aliasee of an alias definition, parsed from the tokens between the
-/// `alias` keyword and the end of the definition.
+/// The aliasee of an alias definition, parsed from its operand position.
 ///
-/// Only two shapes name a callable: a bare global, and an identity-preserving
-/// cast wrapping one. The aliasee is the definition's last operand, so it is
-/// read from the end. Every other constant expression — `select`,
-/// `getelementptr`, `inttoptr`, and the rest — fails closed as `Unnamed`:
-/// deciding which of a `select`'s operands the alias resolves to is reasoning
-/// this evidence does not support, and guessing one would publish a target
-/// claim the module does not make.
+/// An alias is written `alias <AliaseeTy>, <AliaseeTy>* @aliasee` with an
+/// optional trailing clause such as `, partition "..."`, so the aliasee is the
+/// operand after the comma that ends the aliasee type, not the definition's
+/// last token: a trailing clause, or a following `module asm` or `attributes`
+/// block, must not hide it.
+///
+/// Only two operand shapes name a callable: a bare global, and an
+/// identity-preserving cast wrapping one. Type syntax on the way to the
+/// operand — a parenthesised function type, a braced struct type — is stepped
+/// over by depth. Every other constant expression, such as `select` or
+/// `getelementptr`, fails closed as `Unnamed`: deciding which of a `select`'s
+/// operands the alias resolves to is reasoning this evidence does not support,
+/// and guessing one would publish a target claim the module does not make.
 fn alias_aliasee(tokens: &[LlvmToken], keyword: usize) -> CalleeOperand {
-    let Some(last) = module_definition_end(tokens, keyword + 1)
-        .checked_sub(1)
-        .filter(|last| *last > keyword)
-    else {
+    let end = module_definition_end(tokens, keyword + 1);
+    let Some(operand) = type_separator(tokens, keyword + 1, end).map(|comma| comma + 1) else {
         return CalleeOperand::Unnamed;
     };
-    match &tokens[last].kind {
-        LlvmTokenKind::Global(name) => CalleeOperand::Global(name.clone()),
-        LlvmTokenKind::RightParenthesis => matching_left_parenthesis(tokens, last)
-            .and_then(|open| open.checked_sub(1))
-            .filter(|head| *head > keyword)
-            .map_or(CalleeOperand::Unnamed, |head| {
-                cast_callee_operand(tokens, head)
-            }),
-        _ => CalleeOperand::Unnamed,
+    let mut index = operand;
+    while index < end {
+        match &tokens[index].kind {
+            LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
+            LlvmTokenKind::Comma => return CalleeOperand::Unnamed,
+            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
+                return cast_callee_operand(tokens, index);
+            }
+            LlvmTokenKind::LeftParenthesis => {
+                let Some(close) = matching_right_parenthesis(tokens, index) else {
+                    return CalleeOperand::Unnamed;
+                };
+                index = close + 1;
+            }
+            LlvmTokenKind::LeftBrace => {
+                let Some(close) = matching_right_brace(tokens, index) else {
+                    return CalleeOperand::Unnamed;
+                };
+                index = close + 1;
+            }
+            _ => index += 1,
+        }
     }
+    CalleeOperand::Unnamed
+}
+
+/// Finds the comma that ends an alias's aliasee type, skipping the commas
+/// inside parenthesised function types and braced struct types.
+fn type_separator(tokens: &[LlvmToken], start: usize, end: usize) -> Option<usize> {
+    let mut index = start;
+    while index < end {
+        match &tokens[index].kind {
+            LlvmTokenKind::Comma => return Some(index),
+            LlvmTokenKind::LeftParenthesis => {
+                index = matching_right_parenthesis(tokens, index)? + 1
+            }
+            LlvmTokenKind::LeftBrace => index = matching_right_brace(tokens, index)? + 1,
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 /// Classifies a parsed callee operand against the module's declared globals.

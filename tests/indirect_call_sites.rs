@@ -1656,24 +1656,24 @@ fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
         "alias_caller",
     );
 
-    assert_eq!(
-        resolutions(&result),
-        [
-            Resolution::Complete,
-            Resolution::Complete,
-            Resolution::Complete,
-            Resolution::Complete,
-        ]
-    );
+    assert_eq!(resolutions(&result), [Resolution::Complete; 7]);
     assert_eq!(
         result
             .relationships
             .iter()
             .map(|relationship| relationship.callee_display_name.as_str())
             .collect::<Vec<_>>(),
-        ["aliased", "resolved", "split", "cast_aliased"]
+        [
+            "aliased",
+            "resolved",
+            "split",
+            "cast_aliased",
+            "partitioned",
+            "before_module_asm",
+            "before_attributes",
+        ]
     );
-    assert_eq!(lines, [17, 18, 19, 20]);
+    assert_eq!(lines, [21, 22, 23, 24, 25, 26, 27]);
 
     let exported: serde_json::Value =
         serde_json::from_str(&Application.export_snapshot_json(&snapshot).unwrap()).unwrap();
@@ -1704,7 +1704,10 @@ fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
             ("alias_caller".to_owned(), "llvm-function".to_owned()),
             ("aliased".to_owned(), "llvm-alias".to_owned()),
             ("aliasee".to_owned(), "llvm-function".to_owned()),
+            ("before_attributes".to_owned(), "llvm-alias".to_owned()),
+            ("before_module_asm".to_owned(), "llvm-alias".to_owned()),
             ("cast_aliased".to_owned(), "llvm-alias".to_owned()),
+            ("partitioned".to_owned(), "llvm-alias".to_owned()),
             ("resolved".to_owned(), "llvm-ifunc".to_owned()),
             ("resolver".to_owned(), "llvm-function".to_owned()),
             ("split".to_owned(), "llvm-alias".to_owned()),
