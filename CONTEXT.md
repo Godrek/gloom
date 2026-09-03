@@ -45,7 +45,7 @@ A claim that a call site may invoke a particular callable entity or manifestatio
 _Avoid_: Callee edge, resolved call
 
 **Resolution**:
-The degree to which a call site's possible targets are known: complete, partial, or absent. Resolution is independent of the kinds of evidence supporting individual target claims.
+The degree to which a call site's possible targets are known: complete, partial, or absent. Resolution is independent of the kinds of evidence supporting individual target claims, but only static-scoped resolution evidence may support completeness, because a runtime observation reports what one workload did rather than what a call site can do.
 _Avoid_: Confidence, certainty
 
 **Evidence scope**:

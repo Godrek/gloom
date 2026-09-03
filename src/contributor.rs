@@ -1,5 +1,6 @@
 use crate::snapshot::{
     EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId, Resolution,
+    complete_resolution_evidence_error,
 };
 use std::path::Path;
 
@@ -259,6 +260,11 @@ impl EvidenceContribution {
                     "contributed call-site resolution {:?} is incompatible with {contextual_target_count} target claims in its observation context",
                     call_site.resolution,
                 ));
+            }
+            if call_site.resolution.requires_static_resolution_evidence()
+                && call_site.evidence.scope != EvidenceScope::Static
+            {
+                return Err(complete_resolution_evidence_error("contributed call site"));
             }
             if call_site.kind == ContributedCallKind::Direct
                 && (call_site.resolution != Resolution::Complete || contextual_target_count != 1)

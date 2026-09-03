@@ -288,6 +288,26 @@ impl Resolution {
             Self::Partial | Self::Complete => target_count > 0,
         }
     }
+
+    /// Complete resolution asserts a closed world at one call site: the
+    /// recorded targets are the only targets the site can invoke. A runtime
+    /// observation reports what one workload did, so it may support absent or
+    /// partial resolution but never completeness on its own.
+    pub fn requires_static_resolution_evidence(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+/// Shared wording for the one policy both the contributor seam and snapshot
+/// loading enforce, so a rejected contribution and a rejected export explain
+/// the same requirement.
+pub(crate) fn complete_resolution_evidence_error(subject: &str) -> String {
+    format!(
+        "{subject} declares Complete resolution without static-scoped resolution evidence; \
+         Complete resolution requires at least one call-site-resolution evidence record whose \
+         scope is Static, because runtime observation alone cannot establish that observed \
+         targets are the only possible targets"
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1102,7 @@ impl PublishedSnapshot {
                         resolution.call_site_id, resolution.observation_context_id
                     )
                 })?;
+            let mut static_resolution_evidence = false;
             for evidence_id in &resolution.evidence_ids {
                 let evidence = evidence_by_id.get(evidence_id.as_str()).ok_or_else(|| {
                     format!(
@@ -1101,6 +1122,15 @@ impl PublishedSnapshot {
                         resolution.call_site_id
                     ));
                 }
+                static_resolution_evidence |= evidence.scope == EvidenceScope::Static;
+            }
+            if resolution.resolution.requires_static_resolution_evidence()
+                && !static_resolution_evidence
+            {
+                return Err(complete_resolution_evidence_error(&format!(
+                    "resolution for '{}'",
+                    resolution.call_site_id
+                )));
             }
         }
         let claim_ids: BTreeSet<_> = self
