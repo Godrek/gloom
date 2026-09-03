@@ -1,6 +1,7 @@
 use crate::snapshot::{
     EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId, Resolution,
 };
+use std::fmt;
 use std::path::Path;
 
 /// Version of the seam between evidence contributors and the core model.
@@ -16,7 +17,17 @@ use std::path::Path;
 /// - `3`: contributors emit one contributor-identity evidence record per
 ///   contributed callable manifestation, located in the evidence artifact.
 ///   Correspondence claims are derived from that identity evidence alone.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
+/// - `4`: every contributed evidence record carries its own provenance, the
+///   evidence artifact it was read in plus the line it was read at, instead of
+///   inheriting the location of the call site or callable it supports.
+///   Contributors also assert a contributor call-site identity for each
+///   contributed call site, so a later acquired input can attach target claims
+///   to an already-published call site instead of publishing a second
+///   call-site entity. Such a reference names the observation context, the
+///   acquired input's content fingerprint, the caller's contributor callable
+///   identity, and the call-site identity; a call site's target-set resolution
+///   stays as the contribution that published it asserted.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "4";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -72,21 +83,99 @@ pub enum ContributedCallKind {
     Indirect,
 }
 
+/// Where a contributor read one piece of evidence.
+///
+/// The artifact names the acquired input the contributor observed: it must be
+/// the evidence artifact of the input this contribution was produced from, so
+/// that a contributor can only cite provenance it actually acquired. Evidence
+/// about a call site that another acquired input published therefore keeps its
+/// own artifact and line instead of inheriting the call site's location.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContributedEvidenceLocation {
+    pub evidence_artifact: String,
+    pub line: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedEvidence {
     pub evidence_type: String,
     pub scope: EvidenceScope,
     pub support: EvidenceSupport,
+    pub location: ContributedEvidenceLocation,
+}
+
+/// The identity an evidence contributor asserts for a call site. It is opaque
+/// to the core, which never parses it, but it must be a stable, exactly
+/// reproducible string: a later acquired input reaches an existing call site by
+/// repeating it, so surrounding whitespace and empty identities are rejected
+/// rather than silently trimmed into a different identity.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ContributorCallSiteId(String);
+
+impl ContributorCallSiteId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value {
+            return Err(format!(
+                "contributor call-site identity {value:?} must be non-empty and free of surrounding whitespace"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContributorCallSiteId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallSite {
+    /// The identity the contributor asserts for this call site. It must be
+    /// unique within its observation context and acquired input, and it is the
+    /// only handle by which a later acquired input may attach further evidence
+    /// to this call site.
+    pub contributor_call_site_id: ContributorCallSiteId,
     pub kind: ContributedCallKind,
     pub caller_callable_id: String,
     pub line: usize,
     pub observation_context_id: ObservationContextId,
     pub resolution: Resolution,
     pub evidence: ContributedEvidence,
+    pub target_claims: Vec<ContributedTargetClaim>,
+}
+
+/// A reference to a call site an acquired input already published.
+///
+/// A contributor call-site identity is unique only within one observation
+/// context and one acquired input, so a reference has to name the acquired
+/// input too. It does that by content fingerprint, the same fingerprint the
+/// contributor declared for that input, because acquired-input identities are
+/// assigned by the core at publication time and paths are not stable evidence.
+///
+/// Only the contributor's asserted identities may join a later acquired input's
+/// evidence to an existing call site: display names, source lines, and similar
+/// bodies never do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContributedCallSiteReference {
+    pub observation_context_id: ObservationContextId,
+    pub acquired_input_fingerprint: String,
+    pub caller_callable_id: String,
+    pub contributor_call_site_id: ContributorCallSiteId,
+}
+
+/// Target claims a later acquired input attaches to an already-published call
+/// site. An attachment never restates the call site's target-set resolution:
+/// the resolution stays exactly as the contribution that published the site
+/// asserted it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContributedCallSiteAttachment {
+    pub call_site: ContributedCallSiteReference,
     pub target_claims: Vec<ContributedTargetClaim>,
 }
 
@@ -105,6 +194,7 @@ pub struct EvidenceContribution {
     pub observation_contexts: Vec<ObservationContext>,
     pub callables: Vec<ContributedCallable>,
     pub call_sites: Vec<ContributedCallSite>,
+    pub call_site_attachments: Vec<ContributedCallSiteAttachment>,
 }
 
 /// A versioned seam between evidence-source adapters and Gloom's core model.
@@ -197,6 +287,7 @@ impl EvidenceContribution {
                 ));
             }
         }
+        let artifact = self.input.evidence_artifact.as_str();
         let mut callable_identities = std::collections::BTreeSet::new();
         for callable in &self.callables {
             if callable.contributor_callable_id.trim().is_empty()
@@ -225,7 +316,19 @@ impl EvidenceContribution {
                     .get(callable.observation_context_id.as_str())
                     .expect("contributed callable context must exist"),
                 EvidenceSupport::ContributorIdentity,
+                artifact,
             )?;
+            // Identity evidence is the contributor's account of declaring this
+            // callable, so it is read where the declaration is: the same
+            // acquired input, at the callable's own line.
+            if callable.identity_evidence.location.line != callable.line {
+                return Err(format!(
+                    "contributed identity evidence at line {} does not locate callable '{}' at line {}",
+                    callable.identity_evidence.location.line,
+                    callable.contributor_callable_id,
+                    callable.line
+                ));
+            }
             if !callable_identities.insert((
                 callable.observation_context_id.as_str(),
                 callable.contributor_callable_id.as_str(),
@@ -236,9 +339,19 @@ impl EvidenceContribution {
                 ));
             }
         }
+        let mut call_site_identities = std::collections::BTreeSet::new();
         for call_site in &self.call_sites {
             if call_site.caller_callable_id.trim().is_empty() || call_site.line == 0 {
                 return Err("contributed call-site evidence is not fully qualified".into());
+            }
+            if !call_site_identities.insert((
+                call_site.observation_context_id.as_str(),
+                call_site.contributor_call_site_id.as_str(),
+            )) {
+                return Err(format!(
+                    "contributed call-site identity '{}' is not unique in observation context '{}'",
+                    call_site.contributor_call_site_id, call_site.observation_context_id
+                ));
             }
             let required_capability = match call_site.kind {
                 ContributedCallKind::Direct => EvidenceCapability::DirectCallEvidence,
@@ -261,7 +374,18 @@ impl EvidenceContribution {
                     .get(call_site.observation_context_id.as_str())
                     .expect("contributed call-site context must exist"),
                 EvidenceSupport::CallSiteResolution,
+                artifact,
             )?;
+            // Resolution evidence read in the same acquired input as the call
+            // site is a statement about that site, so it must be located where
+            // the site is. Evidence read in another acquired input keeps its
+            // own line and is checked against nothing but its own artifact.
+            if call_site.evidence.location.line != call_site.line {
+                return Err(format!(
+                    "contributed call-site resolution evidence at line {} does not locate the call site at line {}",
+                    call_site.evidence.location.line, call_site.line
+                ));
+            }
             if !callable_identities.contains(&(
                 call_site.observation_context_id.as_str(),
                 call_site.caller_callable_id.as_str(),
@@ -294,29 +418,66 @@ impl EvidenceContribution {
                 );
             }
             for target in &call_site.target_claims {
-                if target.target_callable_id.trim().is_empty()
-                    || target.callee_display_name.is_empty()
-                    || target.target_representation.is_empty()
-                    || target.evidence.is_empty()
-                {
-                    return Err("contributed target claim is not fully qualified".into());
-                }
-                if !context_ids.contains(target.observation_context_id.as_str()) {
-                    return Err(format!(
-                        "contributed target claim references unknown observation context '{}'",
-                        target.observation_context_id
-                    ));
-                }
-                let target_context = contexts_by_id
-                    .get(target.observation_context_id.as_str())
-                    .expect("contributed target context must exist");
-                for evidence in &target.evidence {
-                    evidence.validate(target_context, EvidenceSupport::TargetClaim)?;
-                }
+                validate_target_claim(target, &context_ids, &contexts_by_id, artifact)?;
+            }
+        }
+        for attachment in &self.call_site_attachments {
+            let reference = &attachment.call_site;
+            if reference.caller_callable_id.trim().is_empty()
+                || reference.acquired_input_fingerprint.trim().is_empty()
+            {
+                return Err("contributed call-site attachment does not identify the call site it attaches to".into());
+            }
+            if !context_ids.contains(reference.observation_context_id.as_str()) {
+                return Err(format!(
+                    "contributed call-site attachment references unknown observation context '{}'",
+                    reference.observation_context_id
+                ));
+            }
+            if attachment.target_claims.is_empty() {
+                return Err(format!(
+                    "contributed call-site attachment to '{}' contributes no target claims",
+                    reference.contributor_call_site_id
+                ));
+            }
+            for target in &attachment.target_claims {
+                validate_target_claim(target, &context_ids, &contexts_by_id, artifact)?;
             }
         }
         Ok(())
     }
+}
+
+fn validate_target_claim(
+    target: &ContributedTargetClaim,
+    context_ids: &std::collections::BTreeSet<&str>,
+    contexts_by_id: &std::collections::BTreeMap<&str, &ObservationContext>,
+    evidence_artifact: &str,
+) -> Result<(), String> {
+    if target.target_callable_id.trim().is_empty()
+        || target.callee_display_name.is_empty()
+        || target.target_representation.is_empty()
+        || target.evidence.is_empty()
+    {
+        return Err("contributed target claim is not fully qualified".into());
+    }
+    if !context_ids.contains(target.observation_context_id.as_str()) {
+        return Err(format!(
+            "contributed target claim references unknown observation context '{}'",
+            target.observation_context_id
+        ));
+    }
+    let target_context = contexts_by_id
+        .get(target.observation_context_id.as_str())
+        .expect("contributed target context must exist");
+    for evidence in &target.evidence {
+        evidence.validate(
+            target_context,
+            EvidenceSupport::TargetClaim,
+            evidence_artifact,
+        )?;
+    }
+    Ok(())
 }
 
 impl ContributedEvidence {
@@ -324,9 +485,22 @@ impl ContributedEvidence {
         &self,
         context: &ObservationContext,
         expected_support: EvidenceSupport,
+        evidence_artifact: &str,
     ) -> Result<(), String> {
         if self.evidence_type.trim().is_empty() {
             return Err("contributed evidence type cannot be empty".into());
+        }
+        if self.location.evidence_artifact != evidence_artifact {
+            return Err(format!(
+                "contributed evidence '{}' claims provenance in evidence artifact '{}' rather than the acquired input '{evidence_artifact}' it was contributed from",
+                self.evidence_type, self.location.evidence_artifact
+            ));
+        }
+        if self.location.line == 0 {
+            return Err(format!(
+                "contributed evidence '{}' has no location within its evidence artifact",
+                self.evidence_type
+            ));
         }
         if self.support != expected_support {
             return Err(format!(
@@ -396,9 +570,14 @@ mod tests {
                     evidence_type: "static-callable-identity".into(),
                     scope: EvidenceScope::Static,
                     support: EvidenceSupport::ContributorIdentity,
+                    location: ContributedEvidenceLocation {
+                        evidence_artifact: "fixture".into(),
+                        line: 1,
+                    },
                 },
             }],
             call_sites: vec![ContributedCallSite {
+                contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Direct,
                 caller_callable_id: "caller".into(),
                 line: 1,
@@ -408,6 +587,10 @@ mod tests {
                     evidence_type: "static-call-site".into(),
                     scope: EvidenceScope::Static,
                     support: EvidenceSupport::CallSiteResolution,
+                    location: ContributedEvidenceLocation {
+                        evidence_artifact: "fixture".into(),
+                        line: 1,
+                    },
                 },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "callee".into(),
@@ -418,9 +601,14 @@ mod tests {
                         evidence_type: "static-direct-call".into(),
                         scope: EvidenceScope::Static,
                         support: EvidenceSupport::TargetClaim,
+                        location: ContributedEvidenceLocation {
+                            evidence_artifact: "fixture".into(),
+                            line: 1,
+                        },
                     }],
                 }],
             }],
+            call_site_attachments: Vec::new(),
         };
         (contribution, context)
     }
@@ -431,6 +619,21 @@ mod tests {
             version: "1".into(),
             contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
             capabilities,
+        }
+    }
+
+    #[test]
+    fn contributor_call_site_identities_must_be_exactly_reproducible() {
+        assert_eq!(
+            ContributorCallSiteId::new("llvm-call:0").unwrap().as_str(),
+            "llvm-call:0"
+        );
+        for rejected in ["", "   ", " llvm-call:0", "llvm-call:0\n"] {
+            let error = ContributorCallSiteId::new(rejected).unwrap_err();
+            assert!(
+                error.contains("must be non-empty and free of surrounding whitespace"),
+                "unexpected error: {error}"
+            );
         }
     }
 

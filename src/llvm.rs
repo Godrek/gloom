@@ -1,8 +1,8 @@
 use crate::contributor::{
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, fingerprint_parts,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, fingerprint_parts,
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
@@ -118,10 +118,11 @@ impl EvidenceContributor for LlvmTextContributor {
         let acquired = acquire_llvm_ir(input, &self.clang, &self.clang_flags)?;
         let observations = observe_llvm_ir(&acquired.text)?;
         let content_fingerprint = fingerprint_parts(&[&acquired.text]);
+        let artifact = evidence_artifact(input, &acquired.kind, &content_fingerprint);
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
-                evidence_artifact: evidence_artifact(input, &acquired.kind, &content_fingerprint),
+                evidence_artifact: artifact.clone(),
                 media_type: "application/llvm-ir".into(),
                 acquisition_method: match &acquired.kind {
                     AcquiredInputKind::TextualLlvmIr => "declared-artifact".into(),
@@ -144,51 +145,77 @@ impl EvidenceContributor for LlvmTextContributor {
                         evidence_type: "static-callable-identity".into(),
                         scope: EvidenceScope::Static,
                         support: EvidenceSupport::ContributorIdentity,
+                        location: ContributedEvidenceLocation {
+                            evidence_artifact: artifact.clone(),
+                            line: function.line,
+                        },
                     },
                 })
                 .collect(),
             call_sites: observations
                 .calls
                 .into_iter()
-                .map(|call| match call.target {
-                    ObservedCallTarget::Direct(callee) => ContributedCallSite {
-                        kind: ContributedCallKind::Direct,
-                        caller_callable_id: call.caller,
+                .enumerate()
+                .map(|(call_index, call)| {
+                    // This contributor identifies a call site by the index of
+                    // its call instruction within the acquired artifact rather
+                    // than by `<caller>:<line>`: textual LLVM IR does not
+                    // guarantee one call instruction per line, so a line-based
+                    // identity would not be unique in the artifact, and the
+                    // artifact itself is pinned by its content fingerprint.
+                    let contributor_call_site_id =
+                        ContributorCallSiteId::new(format!("llvm-call:{call_index}"))
+                            .expect("generated call-site identity must be well formed");
+                    let location = ContributedEvidenceLocation {
+                        evidence_artifact: artifact.clone(),
                         line: call.line,
-                        observation_context_id: context.id.clone(),
-                        resolution: Resolution::Complete,
-                        evidence: ContributedEvidence {
-                            evidence_type: "static-call-site".into(),
-                            scope: EvidenceScope::Static,
-                            support: EvidenceSupport::CallSiteResolution,
-                        },
-                        target_claims: vec![ContributedTargetClaim {
-                            target_callable_id: callee.name.clone(),
-                            callee_display_name: callee.name,
-                            target_representation: callee.representation.into(),
+                    };
+                    match call.target {
+                        ObservedCallTarget::Direct(callee) => ContributedCallSite {
+                            contributor_call_site_id,
+                            kind: ContributedCallKind::Direct,
+                            caller_callable_id: call.caller,
+                            line: call.line,
                             observation_context_id: context.id.clone(),
-                            evidence: vec![ContributedEvidence {
-                                evidence_type: "static-direct-call".into(),
+                            resolution: Resolution::Complete,
+                            evidence: ContributedEvidence {
+                                evidence_type: "static-call-site".into(),
                                 scope: EvidenceScope::Static,
-                                support: EvidenceSupport::TargetClaim,
+                                support: EvidenceSupport::CallSiteResolution,
+                                location: location.clone(),
+                            },
+                            target_claims: vec![ContributedTargetClaim {
+                                target_callable_id: callee.name.clone(),
+                                callee_display_name: callee.name,
+                                target_representation: callee.representation.into(),
+                                observation_context_id: context.id.clone(),
+                                evidence: vec![ContributedEvidence {
+                                    evidence_type: "static-direct-call".into(),
+                                    scope: EvidenceScope::Static,
+                                    support: EvidenceSupport::TargetClaim,
+                                    location,
+                                }],
                             }],
-                        }],
-                    },
-                    ObservedCallTarget::Indirect => ContributedCallSite {
-                        kind: ContributedCallKind::Indirect,
-                        caller_callable_id: call.caller,
-                        line: call.line,
-                        observation_context_id: context.id.clone(),
-                        resolution: Resolution::Absent,
-                        evidence: ContributedEvidence {
-                            evidence_type: "static-indirect-call".into(),
-                            scope: EvidenceScope::Static,
-                            support: EvidenceSupport::CallSiteResolution,
                         },
-                        target_claims: Vec::new(),
-                    },
+                        ObservedCallTarget::Indirect => ContributedCallSite {
+                            contributor_call_site_id,
+                            kind: ContributedCallKind::Indirect,
+                            caller_callable_id: call.caller,
+                            line: call.line,
+                            observation_context_id: context.id.clone(),
+                            resolution: Resolution::Absent,
+                            evidence: ContributedEvidence {
+                                evidence_type: "static-indirect-call".into(),
+                                scope: EvidenceScope::Static,
+                                support: EvidenceSupport::CallSiteResolution,
+                                location,
+                            },
+                            target_claims: Vec::new(),
+                        },
+                    }
                 })
                 .collect(),
+            call_site_attachments: Vec::new(),
         })
     }
 }
