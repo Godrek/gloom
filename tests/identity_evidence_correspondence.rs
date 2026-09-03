@@ -1,10 +1,11 @@
 use gloom::app::Application;
 use gloom::{
     CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, ContributedCallKind, ContributedCallSite,
-    ContributedCallable, ContributedEvidence, ContributedInput, ContributedTargetClaim,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, Manifestation,
-    ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
+    ContributedCallable, ContributedEvidence, ContributedEvidenceLocation, ContributedInput,
+    ContributedTargetClaim, ContributorCallSiteId, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, Manifestation, ObservationContext,
+    ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -13,11 +14,17 @@ fn evidence(
     evidence_type: &str,
     scope: EvidenceScope,
     support: EvidenceSupport,
+    evidence_artifact: &str,
+    line: usize,
 ) -> ContributedEvidence {
     ContributedEvidence {
         evidence_type: evidence_type.into(),
         scope,
         support,
+        location: ContributedEvidenceLocation {
+            evidence_artifact: evidence_artifact.into(),
+            line,
+        },
     }
 }
 
@@ -30,16 +37,24 @@ struct ObservedContext {
 }
 
 impl ObservedContext {
-    fn identity_evidence(&self) -> ContributedEvidence {
+    fn identity_evidence(&self, artifact: &str, line: usize) -> ContributedEvidence {
         evidence(
             "contributed-callable-identity",
             self.scope,
             EvidenceSupport::ContributorIdentity,
+            artifact,
+            line,
         )
     }
 
-    fn target_evidence(&self) -> ContributedEvidence {
-        evidence("observed-target", self.scope, EvidenceSupport::TargetClaim)
+    fn target_evidence(&self, artifact: &str, line: usize) -> ContributedEvidence {
+        evidence(
+            "observed-target",
+            self.scope,
+            EvidenceSupport::TargetClaim,
+            artifact,
+            line,
+        )
     }
 }
 
@@ -77,7 +92,7 @@ fn observed_contexts(publication: &ObservationContext) -> Vec<ObservedContext> {
     ]
 }
 
-fn shared_target(observed: &ObservedContext, line: usize) -> ContributedCallable {
+fn shared_target(observed: &ObservedContext, line: usize, artifact: &str) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: "shared_target".into(),
         display_name: "shared_target".into(),
@@ -85,7 +100,7 @@ fn shared_target(observed: &ObservedContext, line: usize) -> ContributedCallable
         representation: observed.representation.into(),
         observation_context_id: observed.context.id.clone(),
         line,
-        identity_evidence: observed.identity_evidence(),
+        identity_evidence: observed.identity_evidence(artifact, line),
     }
 }
 
@@ -99,7 +114,7 @@ fn fixture_input(input: &Path, fingerprint: &str) -> ContributedInput {
     }
 }
 
-fn dispatch(observed: &ObservedContext) -> ContributedCallable {
+fn dispatch(observed: &ObservedContext, artifact: &str) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: "dispatch".into(),
         display_name: "dispatch".into(),
@@ -107,7 +122,7 @@ fn dispatch(observed: &ObservedContext) -> ContributedCallable {
         representation: observed.representation.into(),
         observation_context_id: observed.context.id.clone(),
         line: 1,
-        identity_evidence: observed.identity_evidence(),
+        identity_evidence: observed.identity_evidence(artifact, 1),
     }
 }
 
@@ -140,13 +155,14 @@ impl EvidenceContributor for SharedTargetFixture {
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
         let observed = observed_contexts(context);
-        let mut callables = vec![dispatch(&observed[0])];
+        let artifact = input.display().to_string();
+        let mut callables = vec![dispatch(&observed[0], &artifact)];
         callables.extend(
             observed
                 .iter()
                 .take(self.identity_evidenced_contexts)
                 .enumerate()
-                .map(|(index, observed)| shared_target(observed, index + 2)),
+                .map(|(index, observed)| shared_target(observed, index + 2, &artifact)),
         );
         Ok(EvidenceContribution {
             input: fixture_input(input, "fixture:shared-target"),
@@ -156,6 +172,7 @@ impl EvidenceContributor for SharedTargetFixture {
                 .collect(),
             callables,
             call_sites: vec![ContributedCallSite {
+                contributor_call_site_id: ContributorCallSiteId::new("dispatch:9").unwrap(),
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "dispatch".into(),
                 line: 9,
@@ -165,6 +182,8 @@ impl EvidenceContributor for SharedTargetFixture {
                     "static-indirect-call",
                     EvidenceScope::Static,
                     EvidenceSupport::CallSiteResolution,
+                    &artifact,
+                    9,
                 ),
                 target_claims: observed
                     .iter()
@@ -173,10 +192,11 @@ impl EvidenceContributor for SharedTargetFixture {
                         callee_display_name: "shared_target".into(),
                         target_representation: observed.representation.into(),
                         observation_context_id: observed.context.id.clone(),
-                        evidence: vec![observed.target_evidence()],
+                        evidence: vec![observed.target_evidence(&artifact, 9)],
                     })
                     .collect(),
             }],
+            call_site_attachments: Vec::new(),
         })
     }
 }
@@ -202,16 +222,17 @@ impl EvidenceContributor for DuplicateCallableFixture {
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
         let observed = observed_contexts(context);
+        let artifact = input.display().to_string();
         let mut callables = vec![
-            shared_target(&observed[0], 2),
-            shared_target(&observed[0], 3),
+            shared_target(&observed[0], 2, &artifact),
+            shared_target(&observed[0], 3, &artifact),
         ];
         callables.extend(
             observed
                 .iter()
                 .skip(1)
                 .enumerate()
-                .map(|(index, observed)| shared_target(observed, index + 4)),
+                .map(|(index, observed)| shared_target(observed, index + 4, &artifact)),
         );
         Ok(EvidenceContribution {
             input: fixture_input(input, "fixture:duplicate-callable"),
@@ -221,6 +242,7 @@ impl EvidenceContributor for DuplicateCallableFixture {
                 .collect(),
             callables,
             call_sites: Vec::new(),
+            call_site_attachments: Vec::new(),
         })
     }
 }
