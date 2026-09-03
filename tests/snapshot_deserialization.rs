@@ -71,7 +71,7 @@ fn rejection(edit: impl FnOnce(&mut serde_json::Value)) -> String {
 }
 
 #[test]
-fn a_coherent_export_deserializes_into_the_snapshot_it_was_exported_from() {
+fn a_coherent_export_deserializes_into_the_published_snapshot_it_came_from() {
     let snapshot = published();
     let text = Application.export_snapshot_json(&snapshot).unwrap();
 
@@ -85,7 +85,7 @@ fn a_coherent_export_deserializes_into_the_snapshot_it_was_exported_from() {
 }
 
 #[test]
-fn a_document_of_another_schema_never_becomes_a_snapshot() {
+fn a_document_of_another_schema_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         document["schema_version"] = serde_json::json!("1.0");
     });
@@ -94,7 +94,7 @@ fn a_document_of_another_schema_never_becomes_a_snapshot() {
 }
 
 #[test]
-fn an_acquired_input_the_snapshot_never_acquired_never_becomes_a_snapshot() {
+fn an_acquired_input_the_snapshot_never_acquired_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         document["acquired_inputs"][0]["id"] = serde_json::json!("input:forged");
     });
@@ -106,7 +106,7 @@ fn an_acquired_input_the_snapshot_never_acquired_never_becomes_a_snapshot() {
 }
 
 #[test]
-fn evidence_reclassified_onto_another_kind_of_support_never_becomes_a_snapshot() {
+fn evidence_reclassified_onto_another_kind_of_support_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         let target_evidence_id = document["target_claims"][0]["evidence_ids"][0].clone();
         let evidence = document["evidence_records"]
@@ -126,7 +126,7 @@ fn evidence_reclassified_onto_another_kind_of_support_never_becomes_a_snapshot()
 }
 
 #[test]
-fn complete_resolution_stripped_of_its_completeness_basis_never_becomes_a_snapshot() {
+fn complete_resolution_stripped_of_its_completeness_basis_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         for evidence in document["evidence_records"].as_array_mut().unwrap() {
             evidence
@@ -143,7 +143,7 @@ fn complete_resolution_stripped_of_its_completeness_basis_never_becomes_a_snapsh
 }
 
 #[test]
-fn a_claim_derived_by_an_invented_rule_never_becomes_a_snapshot() {
+fn a_claim_derived_by_an_invented_rule_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         document["derivations"][0]["rule"] = serde_json::json!("target-from-matching-names");
     });
@@ -155,7 +155,7 @@ fn a_claim_derived_by_an_invented_rule_never_becomes_a_snapshot() {
 }
 
 #[test]
-fn a_projection_that_contradicts_its_claims_never_becomes_a_snapshot() {
+fn a_projection_that_contradicts_its_claims_never_becomes_a_published_snapshot() {
     let error = rejection(|document| {
         let caller_entity_id =
             document["call_graph_projection"]["relationships"][0]["caller_entity_id"].clone();
@@ -164,4 +164,37 @@ fn a_projection_that_contradicts_its_claims_never_becomes_a_snapshot() {
     });
 
     assert!(error.contains("does not match its target claim"), "{error}");
+}
+
+/// A document that is not a published snapshot at all is still reported
+/// against the type it failed to be, not against the private stand-in that
+/// reads the wire form.
+#[test]
+fn a_document_of_the_wrong_shape_is_reported_against_the_published_snapshot() {
+    let loaded = Application.load_snapshot_json("[]").unwrap_err();
+    let deserialized = serde_json::from_str::<PublishedSnapshot>("[]")
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        loaded.contains("expected struct PublishedSnapshot"),
+        "{loaded}"
+    );
+    assert_eq!(deserialized, loaded);
+}
+
+/// Loading reads the whole text before judging what it says, so a file holding
+/// more than one document is reported as the malformed text it is rather than
+/// as the first invariant its leading document happens to break.
+#[test]
+fn text_holding_more_than_one_document_is_rejected_as_malformed_text() {
+    let coherent = Application.export_snapshot_json(&published()).unwrap();
+    let mut tampered = exported();
+    tampered["schema_version"] = serde_json::json!("1.0");
+    let tampered = serde_json::to_string(&tampered).unwrap();
+
+    for text in [format!("{coherent}{{}}"), format!("{tampered}{{}}")] {
+        let error = Application.load_snapshot_json(&text).unwrap_err();
+        assert!(error.starts_with("trailing characters"), "{error}");
+    }
 }

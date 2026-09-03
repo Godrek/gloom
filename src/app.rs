@@ -82,11 +82,11 @@ impl Application {
 
     /// Reads a published snapshot back from an export.
     ///
-    /// Deserializing a `PublishedSnapshot` validates the document, so loading
-    /// is exactly that: a coherent export becomes a snapshot and an incoherent
-    /// one becomes the error `validate` reports for it.
+    /// Deserializing a `PublishedSnapshot` validates it wherever it happens, so
+    /// loading enforces nothing of its own: a coherent export becomes a
+    /// snapshot and an incoherent one becomes the error validation reports.
     pub fn load_snapshot_json(&self, text: &str) -> Result<PublishedSnapshot, String> {
-        serde_json::from_str(text).map_err(|error| error.to_string())
+        crate::snapshot::load_json(text)
     }
 
     pub fn render_snapshot_viewer(&self, snapshot: &PublishedSnapshot) -> Result<String, String> {
