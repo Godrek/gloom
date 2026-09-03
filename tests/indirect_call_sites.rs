@@ -1,6 +1,6 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
+    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CompletenessBasis,
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
     ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
     ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
@@ -35,10 +35,20 @@ fn evidence(
         evidence_type: evidence_type.into(),
         scope,
         support,
+        completeness_basis: None,
         location: ContributedEvidenceLocation {
             evidence_artifact: evidence_artifact.into(),
             line,
         },
+    }
+}
+
+/// Complete resolution requires an explicit completeness basis, so a fixture
+/// that publishes a complete call site declares why its target set is closed.
+fn completeness_basis() -> CompletenessBasis {
+    CompletenessBasis {
+        boundary: "the fixture call instruction".into(),
+        guarantee: "the fixture enumerates every target this call site can reach".into(),
     }
 }
 
@@ -379,13 +389,16 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                 line: 1,
                 observation_context_id: context.id.clone(),
                 resolution: Resolution::Complete,
-                evidence: evidence(
-                    "static-indirect-call",
-                    EvidenceScope::Static,
-                    EvidenceSupport::CallSiteResolution,
-                    &artifact,
-                    1,
-                ),
+                evidence: ContributedEvidence {
+                    completeness_basis: Some(completeness_basis()),
+                    ..evidence(
+                        "static-indirect-call",
+                        EvidenceScope::Static,
+                        EvidenceSupport::CallSiteResolution,
+                        &artifact,
+                        1,
+                    )
+                },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "runtime_target".into(),
                     callee_display_name: "runtime_target".into(),

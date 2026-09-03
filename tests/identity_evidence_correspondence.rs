@@ -21,6 +21,7 @@ fn evidence(
         evidence_type: evidence_type.into(),
         scope,
         support,
+        completeness_basis: None,
         location: ContributedEvidenceLocation {
             evidence_artifact: evidence_artifact.into(),
             line,

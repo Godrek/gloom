@@ -5,7 +5,9 @@ use crate::contributor::{
     EvidenceContribution, EvidenceContributor, fingerprint_parts,
 };
 use crate::model::{Graph, Node};
-use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
+use crate::snapshot::{
+    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, Resolution,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -145,6 +147,7 @@ impl EvidenceContributor for LlvmTextContributor {
                         evidence_type: "static-callable-identity".into(),
                         scope: EvidenceScope::Static,
                         support: EvidenceSupport::ContributorIdentity,
+                        completeness_basis: None,
                         location: ContributedEvidenceLocation {
                             evidence_artifact: artifact.clone(),
                             line: function.line,
@@ -182,6 +185,12 @@ impl EvidenceContributor for LlvmTextContributor {
                                 evidence_type: "static-call-site".into(),
                                 scope: EvidenceScope::Static,
                                 support: EvidenceSupport::CallSiteResolution,
+                                completeness_basis: Some(CompletenessBasis {
+                                    boundary: "the call instruction".into(),
+                                    guarantee:
+                                        "a direct call instruction names exactly one callee operand"
+                                            .into(),
+                                }),
                                 location: location.clone(),
                             },
                             target_claims: vec![ContributedTargetClaim {
@@ -193,6 +202,7 @@ impl EvidenceContributor for LlvmTextContributor {
                                     evidence_type: "static-direct-call".into(),
                                     scope: EvidenceScope::Static,
                                     support: EvidenceSupport::TargetClaim,
+                                    completeness_basis: None,
                                     location,
                                 }],
                             }],
@@ -208,6 +218,7 @@ impl EvidenceContributor for LlvmTextContributor {
                                 evidence_type: "static-indirect-call".into(),
                                 scope: EvidenceScope::Static,
                                 support: EvidenceSupport::CallSiteResolution,
+                                completeness_basis: None,
                                 location,
                             },
                             target_claims: Vec::new(),

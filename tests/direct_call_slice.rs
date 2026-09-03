@@ -184,12 +184,17 @@ fn explains_one_direct_call_from_evidence_to_projection() {
     assert!(error.contains("duplicate target-claim identities"));
 
     let mut invalid_resolution_support = exported.clone();
-    invalid_resolution_support["evidence_records"]
+    let reclassified = invalid_resolution_support["evidence_records"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
         .find(|evidence| evidence["id"] == serde_json::json!(resolution_evidence.id))
-        .unwrap()["support"] = serde_json::json!("target-claim");
+        .unwrap();
+    reclassified["support"] = serde_json::json!("target-claim");
+    reclassified
+        .as_object_mut()
+        .unwrap()
+        .remove("completeness_basis");
     let error = application
         .load_snapshot_json(&serde_json::to_string(&invalid_resolution_support).unwrap())
         .unwrap_err();
