@@ -1,5 +1,6 @@
 use crate::snapshot::{
-    EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId, Resolution,
+    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId,
+    Resolution, check_completeness_declaration, misplaced_completeness_basis_error,
 };
 use std::fmt;
 use std::path::Path;
@@ -27,7 +28,10 @@ use std::path::Path;
 ///   acquired input's content fingerprint, the caller's contributor callable
 ///   identity, and the call-site identity; a call site's target-set resolution
 ///   stays as the contribution that published it asserted.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "4";
+/// - `5`: call-site-resolution evidence may carry a completeness basis, and a
+///   complete target-set resolution requires one, so a contributor declares the
+///   boundary it closed over instead of asserting completeness on its own.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "5";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -101,6 +105,10 @@ pub struct ContributedEvidence {
     pub evidence_type: String,
     pub scope: EvidenceScope,
     pub support: EvidenceSupport,
+    /// Present only when the contributor explicitly declares that it observed a
+    /// closed target set at this call site. Legal only on
+    /// [`EvidenceSupport::CallSiteResolution`] evidence.
+    pub completeness_basis: Option<CompletenessBasis>,
     pub location: ContributedEvidenceLocation,
 }
 
@@ -409,6 +417,11 @@ impl EvidenceContribution {
                     call_site.resolution,
                 ));
             }
+            check_completeness_declaration(
+                call_site.resolution,
+                call_site.evidence.completeness_basis.is_some(),
+                "contributed call site",
+            )?;
             if call_site.kind == ContributedCallKind::Direct
                 && (call_site.resolution != Resolution::Complete || contextual_target_count != 1)
             {
@@ -514,6 +527,13 @@ impl ContributedEvidence {
                 self.scope, self.evidence_type, context.id
             ));
         }
+        if let Some(basis) = &self.completeness_basis {
+            let subject = format!("contributed evidence '{}'", self.evidence_type);
+            basis.validate(&subject)?;
+            if self.support != EvidenceSupport::CallSiteResolution {
+                return Err(misplaced_completeness_basis_error(&subject));
+            }
+        }
         Ok(())
     }
 }
@@ -570,6 +590,7 @@ mod tests {
                     evidence_type: "static-callable-identity".into(),
                     scope: EvidenceScope::Static,
                     support: EvidenceSupport::ContributorIdentity,
+                    completeness_basis: None,
                     location: ContributedEvidenceLocation {
                         evidence_artifact: "fixture".into(),
                         line: 1,
@@ -587,6 +608,10 @@ mod tests {
                     evidence_type: "static-call-site".into(),
                     scope: EvidenceScope::Static,
                     support: EvidenceSupport::CallSiteResolution,
+                    completeness_basis: Some(CompletenessBasis {
+                        boundary: "the call instruction".into(),
+                        guarantee: "a direct call names exactly one callee operand".into(),
+                    }),
                     location: ContributedEvidenceLocation {
                         evidence_artifact: "fixture".into(),
                         line: 1,
@@ -601,6 +626,7 @@ mod tests {
                         evidence_type: "static-direct-call".into(),
                         scope: EvidenceScope::Static,
                         support: EvidenceSupport::TargetClaim,
+                        completeness_basis: None,
                         location: ContributedEvidenceLocation {
                             evidence_artifact: "fixture".into(),
                             line: 1,
