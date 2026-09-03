@@ -47,10 +47,14 @@ pub struct ContributedInput {
 ///
 /// `identity_evidence` is the contributor's account of that assertion: exactly
 /// one [`EvidenceSupport::ContributorIdentity`] record per contributed
-/// callable, located at `line` in the contributed evidence artifact. It is the
-/// only evidence from which the core derives correspondence claims, so a
-/// manifestation a contribution never declares here, one introduced only by a
-/// target claim, can take part in no correspondence.
+/// callable, located at `line` in the contributed evidence artifact. A
+/// contribution declares each identity at most once per observation context,
+/// so one contributed callable is one manifestation and one identity record.
+///
+/// Identity evidence is the only evidence from which the core derives
+/// correspondence claims, so a manifestation a contribution never declares
+/// here, one introduced only by a target claim, can take part in no
+/// correspondence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallable {
     pub contributor_callable_id: String,
@@ -193,7 +197,7 @@ impl EvidenceContribution {
                 ));
             }
         }
-        let mut callable_identities = std::collections::BTreeMap::new();
+        let mut callable_identities = std::collections::BTreeSet::new();
         for callable in &self.callables {
             if callable.contributor_callable_id.trim().is_empty()
                 || callable.display_name.is_empty()
@@ -222,19 +226,14 @@ impl EvidenceContribution {
                     .expect("contributed callable context must exist"),
                 EvidenceSupport::ContributorIdentity,
             )?;
-            let identity = (
+            if !callable_identities.insert((
                 callable.observation_context_id.as_str(),
                 callable.contributor_callable_id.as_str(),
-            );
-            if let Some(existing) = callable_identities.insert(identity, callable) {
-                if existing.display_name != callable.display_name
-                    || existing.representation != callable.representation
-                {
-                    return Err(format!(
-                        "contributed callable identity '{}' has conflicting labels or representations in observation context '{}'",
-                        callable.contributor_callable_id, callable.observation_context_id
-                    ));
-                }
+            )) {
+                return Err(format!(
+                    "contributed callable identity '{}' has duplicate contributions in observation context '{}'",
+                    callable.contributor_callable_id, callable.observation_context_id
+                ));
             }
         }
         for call_site in &self.call_sites {
@@ -263,7 +262,7 @@ impl EvidenceContribution {
                     .expect("contributed call-site context must exist"),
                 EvidenceSupport::CallSiteResolution,
             )?;
-            if !callable_identities.contains_key(&(
+            if !callable_identities.contains(&(
                 call_site.observation_context_id.as_str(),
                 call_site.caller_callable_id.as_str(),
             )) {

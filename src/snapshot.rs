@@ -440,6 +440,15 @@ pub struct PublishedSnapshot {
     call_graph_projection: CallGraphProjection,
 }
 
+/// The contributor-identity evidence a snapshot publishes for one contributor
+/// callable identity within one acquired input.
+#[derive(Default)]
+struct IdentityEvidenceGroup<'a> {
+    manifestation_ids: BTreeSet<&'a str>,
+    evidence_ids: BTreeSet<&'a str>,
+    observation_context_ids: BTreeSet<&'a str>,
+}
+
 impl PublishedSnapshot {
     pub fn schema_version(&self) -> &str {
         &self.schema_version
@@ -627,6 +636,56 @@ impl PublishedSnapshot {
             evidence_records,
             derivations,
         })
+    }
+
+    /// Groups this snapshot's contributor-identity evidence by the acquired
+    /// input and contributor callable identity it asserts, rejecting a
+    /// manifestation asserted more than once.
+    ///
+    /// Validation recomputes correspondence claims from these groups, so a
+    /// hand-edited claim can neither cite identity evidence for another
+    /// callable, nor drop a manifestation whose identity evidence remains, nor
+    /// disappear while its group still spans observation contexts.
+    fn identity_evidence_groups(
+        &self,
+    ) -> Result<BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>>, String> {
+        let manifestations_by_id: BTreeMap<_, _> = self
+            .manifestations
+            .iter()
+            .map(|manifestation| (manifestation.id.as_str(), manifestation))
+            .collect();
+        let mut groups: BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>> = BTreeMap::new();
+        let mut asserted_manifestations = BTreeSet::new();
+        for evidence in self
+            .evidence_records
+            .iter()
+            .filter(|evidence| evidence.support == EvidenceSupport::ContributorIdentity)
+        {
+            let manifestation_id = evidence
+                .related_manifestation_ids
+                .first()
+                .expect("validated contributor-identity evidence relates one manifestation");
+            if !asserted_manifestations.insert(manifestation_id.as_str()) {
+                return Err(format!(
+                    "manifestation '{manifestation_id}' has more than one contributor-identity evidence record"
+                ));
+            }
+            let manifestation = manifestations_by_id
+                .get(manifestation_id.as_str())
+                .expect("validated contributor-identity evidence manifestation must exist");
+            let group = groups
+                .entry((
+                    manifestation.acquired_input_id.as_str(),
+                    manifestation.contributor_callable_id.as_str(),
+                ))
+                .or_default();
+            group.manifestation_ids.insert(manifestation_id.as_str());
+            group.evidence_ids.insert(evidence.id.as_str());
+            group
+                .observation_context_ids
+                .insert(manifestation.observation_context_id.as_str());
+        }
+        Ok(groups)
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -835,24 +894,6 @@ impl PublishedSnapshot {
                         evidence.id, evidence.subject_entity_id
                     )
                 })?;
-            match evidence.support {
-                EvidenceSupport::CallSiteResolution | EvidenceSupport::TargetClaim => {
-                    if subject.kind != ProgramEntityKind::CallSite {
-                        return Err(format!(
-                            "evidence record '{}' does not identify a call site",
-                            evidence.id
-                        ));
-                    }
-                }
-                EvidenceSupport::ContributorIdentity => {
-                    if subject.kind != ProgramEntityKind::Callable {
-                        return Err(format!(
-                            "contributor-identity evidence '{}' does not identify a callable",
-                            evidence.id
-                        ));
-                    }
-                }
-            }
             if evidence.source_location.input_id != evidence.acquired_input_id {
                 return Err(format!(
                     "evidence '{}' has a source location in another acquired input",
@@ -867,14 +908,6 @@ impl PublishedSnapshot {
             }
             if evidence.source_location.line == 0 {
                 return Err(format!("evidence '{}' has no source line", evidence.id));
-            }
-            if evidence.support != EvidenceSupport::ContributorIdentity
-                && subject.source_location.as_ref() != Some(&evidence.source_location)
-            {
-                return Err(format!(
-                    "evidence '{}' and call site '{}' disagree about the call-site location",
-                    evidence.id, subject.id
-                ));
             }
             for manifestation_id in &evidence.related_manifestation_ids {
                 let manifestation = manifestations_by_id
@@ -892,28 +925,51 @@ impl PublishedSnapshot {
                     ));
                 }
             }
-            if evidence.support == EvidenceSupport::ContributorIdentity {
-                let identified = match evidence.related_manifestation_ids.as_slice() {
-                    [manifestation_id] => manifestations_by_id
-                        .get(manifestation_id.as_str())
-                        .expect("validated related manifestation must exist"),
-                    _ => {
+            match evidence.support {
+                EvidenceSupport::CallSiteResolution | EvidenceSupport::TargetClaim => {
+                    if subject.kind != ProgramEntityKind::CallSite {
                         return Err(format!(
-                            "contributor-identity evidence '{}' must relate exactly one manifestation",
+                            "evidence record '{}' does not identify a call site",
                             evidence.id
                         ));
                     }
-                };
-                if identified.entity_id != evidence.subject_entity_id
-                    || identified.acquired_input_id != evidence.acquired_input_id
-                {
-                    return Err(format!(
-                        "contributor-identity evidence '{}' does not describe a manifestation of its subject callable",
-                        evidence.id
-                    ));
+                    if subject.source_location.as_ref() != Some(&evidence.source_location) {
+                        return Err(format!(
+                            "evidence '{}' and call site '{}' disagree about the call-site location",
+                            evidence.id, subject.id
+                        ));
+                    }
+                }
+                EvidenceSupport::ContributorIdentity => {
+                    if subject.kind != ProgramEntityKind::Callable {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' does not identify a callable",
+                            evidence.id
+                        ));
+                    }
+                    let identified = match evidence.related_manifestation_ids.as_slice() {
+                        [manifestation_id] => manifestations_by_id
+                            .get(manifestation_id.as_str())
+                            .expect("validated related manifestation must exist"),
+                        _ => {
+                            return Err(format!(
+                                "contributor-identity evidence '{}' must relate exactly one manifestation",
+                                evidence.id
+                            ));
+                        }
+                    };
+                    if identified.entity_id != evidence.subject_entity_id
+                        || identified.acquired_input_id != evidence.acquired_input_id
+                    {
+                        return Err(format!(
+                            "contributor-identity evidence '{}' does not describe a manifestation of its subject callable",
+                            evidence.id
+                        ));
+                    }
                 }
             }
         }
+        let identity_groups = self.identity_evidence_groups()?;
         let correspondence_claims_by_id: BTreeMap<_, _> = self
             .correspondence_claims
             .iter()
@@ -1049,6 +1105,58 @@ impl PublishedSnapshot {
                 return Err(format!(
                     "correspondence claim '{}' lacks evidence for every manifestation",
                     claim.id
+                ));
+            }
+        }
+        for claim in &self.correspondence_claims {
+            let group = identity_groups
+                .get(&(
+                    claim.acquired_input_id.as_str(),
+                    claim.contributor_callable_id.as_str(),
+                ))
+                .filter(|group| group.observation_context_ids.len() > 1)
+                .ok_or_else(|| {
+                    format!(
+                        "correspondence claim '{}' is not derived from contributor-identity evidence spanning observation contexts",
+                        claim.id
+                    )
+                })?;
+            if claim
+                .manifestation_ids
+                .iter()
+                .map(ManifestationId::as_str)
+                .collect::<BTreeSet<_>>()
+                != group.manifestation_ids
+            {
+                return Err(format!(
+                    "correspondence claim '{}' does not identify every manifestation its contributor-identity evidence asserts",
+                    claim.id
+                ));
+            }
+            if claim
+                .evidence_ids
+                .iter()
+                .map(EvidenceId::as_str)
+                .collect::<BTreeSet<_>>()
+                != group.evidence_ids
+            {
+                return Err(format!(
+                    "correspondence claim '{}' does not cite exactly the contributor-identity evidence for its manifestations",
+                    claim.id
+                ));
+            }
+        }
+        for ((acquired_input_id, contributor_callable_id), group) in &identity_groups {
+            if group.observation_context_ids.len() < 2 {
+                continue;
+            }
+            if !self.correspondence_claims.iter().any(|claim| {
+                claim.acquired_input_id.as_str() == *acquired_input_id
+                    && claim.contributor_callable_id == *contributor_callable_id
+            }) {
+                return Err(format!(
+                    "contributor callable identity '{contributor_callable_id}' has contributor-identity evidence in {} observation contexts of acquired input '{acquired_input_id}' but no correspondence claim",
+                    group.observation_context_ids.len()
                 ));
             }
         }

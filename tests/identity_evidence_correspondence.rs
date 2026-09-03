@@ -21,6 +21,96 @@ fn evidence(
     }
 }
 
+/// One observation context of the fixture input, with the representation and
+/// evidence scope the contributor uses there.
+struct ObservedContext {
+    context: ObservationContext,
+    representation: &'static str,
+    scope: EvidenceScope,
+}
+
+impl ObservedContext {
+    fn identity_evidence(&self) -> ContributedEvidence {
+        evidence(
+            "contributed-callable-identity",
+            self.scope,
+            EvidenceSupport::ContributorIdentity,
+        )
+    }
+
+    fn target_evidence(&self) -> ContributedEvidence {
+        evidence("observed-target", self.scope, EvidenceSupport::TargetClaim)
+    }
+}
+
+/// The three observation contexts every fixture in this file observes: the
+/// publication context and two workload-qualified runtime contexts.
+fn observed_contexts(publication: &ObservationContext) -> Vec<ObservedContext> {
+    let runtime = |workload: &str| {
+        ObservationContext::runtime_analysis(
+            publication.program_snapshot_id.as_str(),
+            publication.build_target.clone(),
+            publication.build_configuration.clone(),
+            publication.toolchain.clone(),
+            publication.extraction_method.clone(),
+            publication.extraction_version.clone(),
+            "runtime target tracing",
+            workload,
+        )
+    };
+    vec![
+        ObservedContext {
+            context: publication.clone(),
+            representation: "static-callable",
+            scope: EvidenceScope::Static,
+        },
+        ObservedContext {
+            context: runtime("first workload"),
+            representation: "first-runtime-callable",
+            scope: EvidenceScope::Runtime,
+        },
+        ObservedContext {
+            context: runtime("second workload"),
+            representation: "second-runtime-callable",
+            scope: EvidenceScope::Runtime,
+        },
+    ]
+}
+
+fn shared_target(observed: &ObservedContext, line: usize) -> ContributedCallable {
+    ContributedCallable {
+        contributor_callable_id: "shared_target".into(),
+        display_name: "shared_target".into(),
+        defined: true,
+        representation: observed.representation.into(),
+        observation_context_id: observed.context.id.clone(),
+        line,
+        identity_evidence: observed.identity_evidence(),
+    }
+}
+
+fn fixture_input(input: &Path, fingerprint: &str) -> ContributedInput {
+    ContributedInput {
+        path: input.display().to_string(),
+        evidence_artifact: input.display().to_string(),
+        media_type: "application/x-gloom-fixture".into(),
+        acquisition_method: "semantic-fixture".into(),
+        content_fingerprint: fingerprint.into(),
+    }
+}
+
+fn dispatch(observed: &ObservedContext) -> ContributedCallable {
+    ContributedCallable {
+        contributor_callable_id: "dispatch".into(),
+        display_name: "dispatch".into(),
+        defined: true,
+        representation: observed.representation.into(),
+        observation_context_id: observed.context.id.clone(),
+        line: 1,
+        identity_evidence: observed.identity_evidence(),
+    }
+}
+
 /// A contributor that observes one callable identity, `shared_target`, in three
 /// observation contexts of one acquired input, but asserts that identity, by
 /// emitting contributor-identity evidence, in only the first
@@ -29,48 +119,6 @@ fn evidence(
 /// evidence mentions them.
 struct SharedTargetFixture {
     identity_evidenced_contexts: usize,
-}
-
-struct FixtureContexts {
-    stat: ObservationContext,
-    first_runtime: ObservationContext,
-    second_runtime: ObservationContext,
-}
-
-fn fixture_contexts(context: &ObservationContext) -> FixtureContexts {
-    let runtime = |workload: &str| {
-        ObservationContext::runtime_analysis(
-            context.program_snapshot_id.as_str(),
-            context.build_target.clone(),
-            context.build_configuration.clone(),
-            context.toolchain.clone(),
-            context.extraction_method.clone(),
-            context.extraction_version.clone(),
-            "runtime target tracing",
-            workload,
-        )
-    };
-    FixtureContexts {
-        stat: context.clone(),
-        first_runtime: runtime("first workload"),
-        second_runtime: runtime("second workload"),
-    }
-}
-
-fn representation(index: usize) -> &'static str {
-    [
-        "static-callable",
-        "first-runtime-callable",
-        "second-runtime-callable",
-    ][index]
-}
-
-fn scope(index: usize) -> EvidenceScope {
-    if index == 0 {
-        EvidenceScope::Static
-    } else {
-        EvidenceScope::Runtime
-    }
 }
 
 impl EvidenceContributor for SharedTargetFixture {
@@ -91,81 +139,88 @@ impl EvidenceContributor for SharedTargetFixture {
         input: &Path,
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
-        let contexts = fixture_contexts(context);
-        let ordered = [
-            &contexts.stat,
-            &contexts.first_runtime,
-            &contexts.second_runtime,
-        ];
-        let mut callables = vec![ContributedCallable {
-            contributor_callable_id: "dispatch".into(),
-            display_name: "dispatch".into(),
-            defined: true,
-            representation: "static-callable".into(),
-            observation_context_id: contexts.stat.id.clone(),
-            line: 1,
-            identity_evidence: evidence(
-                "static-callable-identity",
-                EvidenceScope::Static,
-                EvidenceSupport::ContributorIdentity,
-            ),
-        }];
+        let observed = observed_contexts(context);
+        let mut callables = vec![dispatch(&observed[0])];
         callables.extend(
-            ordered
+            observed
                 .iter()
                 .take(self.identity_evidenced_contexts)
                 .enumerate()
-                .map(|(index, observed)| ContributedCallable {
-                    contributor_callable_id: "shared_target".into(),
-                    display_name: "shared_target".into(),
-                    defined: true,
-                    representation: representation(index).into(),
-                    observation_context_id: observed.id.clone(),
-                    line: index + 2,
-                    identity_evidence: evidence(
-                        "contributed-callable-identity",
-                        scope(index),
-                        EvidenceSupport::ContributorIdentity,
-                    ),
-                }),
+                .map(|(index, observed)| shared_target(observed, index + 2)),
         );
         Ok(EvidenceContribution {
-            input: ContributedInput {
-                path: input.display().to_string(),
-                evidence_artifact: input.display().to_string(),
-                media_type: "application/x-gloom-fixture".into(),
-                acquisition_method: "semantic-fixture".into(),
-                content_fingerprint: "fixture:shared-target".into(),
-            },
-            observation_contexts: ordered.iter().map(|observed| (*observed).clone()).collect(),
+            input: fixture_input(input, "fixture:shared-target"),
+            observation_contexts: observed
+                .iter()
+                .map(|observed| observed.context.clone())
+                .collect(),
             callables,
             call_sites: vec![ContributedCallSite {
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "dispatch".into(),
                 line: 9,
-                observation_context_id: contexts.stat.id.clone(),
+                observation_context_id: observed[0].context.id.clone(),
                 resolution: Resolution::Partial,
                 evidence: evidence(
                     "static-indirect-call",
                     EvidenceScope::Static,
                     EvidenceSupport::CallSiteResolution,
                 ),
-                target_claims: ordered
+                target_claims: observed
                     .iter()
-                    .enumerate()
-                    .map(|(index, observed)| ContributedTargetClaim {
+                    .map(|observed| ContributedTargetClaim {
                         target_callable_id: "shared_target".into(),
                         callee_display_name: "shared_target".into(),
-                        target_representation: representation(index).into(),
-                        observation_context_id: observed.id.clone(),
-                        evidence: vec![evidence(
-                            "observed-target",
-                            scope(index),
-                            EvidenceSupport::TargetClaim,
-                        )],
+                        target_representation: observed.representation.into(),
+                        observation_context_id: observed.context.id.clone(),
+                        evidence: vec![observed.target_evidence()],
                     })
                     .collect(),
             }],
+        })
+    }
+}
+
+/// A contributor that declares `shared_target` twice in its publication context
+/// and once in each runtime context. Coalescing those duplicates would publish
+/// three manifestations asserted by four identity evidence records.
+struct DuplicateCallableFixture;
+
+impl EvidenceContributor for DuplicateCallableFixture {
+    fn identity(&self) -> ContributorIdentity {
+        ContributorIdentity {
+            name: "fixture.duplicate-callable".into(),
+            version: "1".into(),
+            contract_version: EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION.into(),
+            capabilities: vec![EvidenceCapability::CallableManifestations],
+        }
+    }
+
+    fn contribute(
+        &self,
+        input: &Path,
+        context: &ObservationContext,
+    ) -> Result<EvidenceContribution, String> {
+        let observed = observed_contexts(context);
+        let mut callables = vec![
+            shared_target(&observed[0], 2),
+            shared_target(&observed[0], 3),
+        ];
+        callables.extend(
+            observed
+                .iter()
+                .skip(1)
+                .enumerate()
+                .map(|(index, observed)| shared_target(observed, index + 4)),
+        );
+        Ok(EvidenceContribution {
+            input: fixture_input(input, "fixture:duplicate-callable"),
+            observation_contexts: observed
+                .iter()
+                .map(|observed| observed.context.clone())
+                .collect(),
+            callables,
+            call_sites: Vec::new(),
         })
     }
 }
@@ -486,6 +541,168 @@ fn evidence_subjects_follow_their_support() {
     );
     assert!(
         error.contains("does not identify a callable"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn duplicate_contributed_callable_identities_are_rejected() {
+    let context = ObservationContext::static_analysis(
+        "snapshot:duplicate-callable-fixture",
+        "duplicate-callable-fixture",
+        "debug fixture",
+        "semantic fixture",
+        "fixture.duplicate-callable",
+        "1",
+        "target analysis",
+    );
+    let error = Application
+        .publish_snapshot(
+            &[PathBuf::from("duplicate-callable.fixture")],
+            context,
+            &DuplicateCallableFixture,
+        )
+        .unwrap_err();
+
+    assert!(
+        error.contains("duplicate contributions in observation context"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn snapshots_reject_more_than_one_identity_record_for_one_manifestation() {
+    let application = Application;
+    let snapshot = publish(3);
+    let exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+
+    let mut duplicated_record = exported["evidence_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["support"] == serde_json::json!("contributor-identity"))
+        .unwrap()
+        .clone();
+    let duplicate_id = format!("{}:duplicate", duplicated_record["id"].as_str().unwrap());
+    duplicated_record["id"] = serde_json::json!(duplicate_id);
+    let mut duplicated = exported;
+    duplicated["evidence_records"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicated_record);
+
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&duplicated).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("more than one contributor-identity evidence record"),
+        "unexpected error: {error}"
+    );
+}
+
+fn identity_evidence_id_for(snapshot: &PublishedSnapshot, contributor_callable_id: &str) -> String {
+    snapshot
+        .evidence_records()
+        .iter()
+        .find(|record| {
+            record.support == EvidenceSupport::ContributorIdentity
+                && record.related_manifestation_ids.iter().any(|id| {
+                    snapshot.manifestations().iter().any(|manifestation| {
+                        manifestation.id == *id
+                            && manifestation.contributor_callable_id == contributor_callable_id
+                    })
+                })
+        })
+        .unwrap()
+        .id
+        .to_string()
+}
+
+#[test]
+fn correspondence_claims_reject_identity_evidence_for_another_callable_on_load() {
+    let application = Application;
+    let snapshot = publish(3);
+    let mut exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    let foreign_evidence_id = identity_evidence_id_for(&snapshot, "dispatch");
+    assert!(
+        !snapshot.correspondence_claims()[0]
+            .evidence_ids
+            .iter()
+            .any(|id| id.as_str() == foreign_evidence_id)
+    );
+
+    exported["correspondence_claims"][0]["evidence_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(foreign_evidence_id));
+
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&exported).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("does not cite exactly the contributor-identity evidence"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn correspondence_claims_reject_a_manifestation_dropped_from_standing_identity_evidence_on_load() {
+    let application = Application;
+    let snapshot = publish(3);
+    let mut exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    let dropped = snapshot
+        .manifestations()
+        .iter()
+        .find(|manifestation| manifestation.representation == "second-runtime-callable")
+        .unwrap();
+    let dropped_evidence_id = snapshot
+        .evidence_records()
+        .iter()
+        .find(|record| {
+            record.support == EvidenceSupport::ContributorIdentity
+                && record.related_manifestation_ids.contains(&dropped.id)
+        })
+        .unwrap()
+        .id
+        .clone();
+
+    let claim = &mut exported["correspondence_claims"][0];
+    claim["manifestation_ids"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|id| *id != serde_json::json!(dropped.id));
+    claim["evidence_ids"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|id| *id != serde_json::json!(dropped_evidence_id));
+
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&exported).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains(
+            "does not identify every manifestation its contributor-identity evidence asserts"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn a_deleted_correspondence_claim_its_identity_evidence_still_supports_is_rejected_on_load() {
+    let application = Application;
+    let snapshot = publish(3);
+    let mut exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    exported["correspondence_claims"] = serde_json::json!([]);
+
+    let error = application
+        .load_snapshot_json(&serde_json::to_string(&exported).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("but no correspondence claim"),
         "unexpected error: {error}"
     );
 }
