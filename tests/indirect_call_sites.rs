@@ -1417,3 +1417,204 @@ fn publishes_each_unresolved_indirect_call_as_a_distinct_call_site() {
         identities
     );
 }
+
+#[test]
+fn cast_wrapped_callees_resolve_through_constant_casts() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:cast-wrapped-callee-fixture",
+        "cast-wrapped-callee-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/cast-wrapped-callee.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: "cast_wrapped_caller".into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [
+            Resolution::Complete,
+            Resolution::Complete,
+            Resolution::Absent,
+            Resolution::Complete,
+            Resolution::Absent,
+        ]
+    );
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                site.targets
+                    .iter()
+                    .map(|target| target.callee_display_name.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        [
+            vec!["target"],
+            vec!["target"],
+            Vec::new(),
+            vec!["target"],
+            Vec::new(),
+        ]
+    );
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                snapshot
+                    .program_entities()
+                    .iter()
+                    .find(|entity| entity.id == site.call_site_id)
+                    .unwrap()
+                    .source_location
+                    .as_ref()
+                    .unwrap()
+                    .line
+            })
+            .collect::<Vec<_>>(),
+        [5, 6, 7, 8, 9]
+    );
+}
+
+#[test]
+fn calls_through_a_global_variable_stay_unresolved_and_name_no_callable() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:global-variable-callee-fixture",
+        "global-variable-callee-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/global-variable-callee.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: "global_variable_caller".into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [Resolution::Absent, Resolution::Complete]
+    );
+    assert!(result.call_sites[0].targets.is_empty());
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                snapshot
+                    .program_entities()
+                    .iter()
+                    .find(|entity| entity.id == site.call_site_id)
+                    .unwrap()
+                    .source_location
+                    .as_ref()
+                    .unwrap()
+                    .line
+            })
+            .collect::<Vec<_>>(),
+        [5, 6]
+    );
+    assert_eq!(result.relationships.len(), 1);
+    assert_eq!(
+        result.relationships[0].callee_display_name,
+        "declared_target"
+    );
+    assert_eq!(
+        snapshot
+            .program_entities()
+            .iter()
+            .filter(|entity| entity.kind == ProgramEntityKind::Callable)
+            .map(|entity| entity.display_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["declared_target", "global_variable_caller"])
+    );
+}
+
+#[test]
+fn alias_and_ifunc_callees_resolve_as_direct_targets() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:alias-callee-fixture",
+        "alias-callee-fixture",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/alias-callees.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: "alias_caller".into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [Resolution::Complete, Resolution::Complete]
+    );
+    assert_eq!(
+        result
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["aliased", "resolved"]
+    );
+}

@@ -6,6 +6,7 @@ use crate::contributor::{
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{EvidenceScope, EvidenceSupport, ObservationContext, Resolution};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -28,6 +29,11 @@ struct ObservedFunction {
     pub defined: bool,
 }
 
+/// What a call site's textual evidence says about its target.
+///
+/// `Direct` is reserved for a callee operand that resolves to a callable the
+/// module declares, defines, or aliases. Everything else is `Indirect`: the
+/// evidence names no callable, so the call site's targets are unresolved.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObservedCallTarget {
     Direct(String),
@@ -38,6 +44,15 @@ enum ObservedCallTarget {
 struct ObservedCall {
     pub caller: String,
     pub target: ObservedCallTarget,
+    pub line: usize,
+}
+
+/// A call site whose callee operand has been parsed but not yet resolved
+/// against the module's callable globals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnresolvedCall {
+    pub caller: String,
+    pub callee: CalleeOperand,
     pub line: usize,
 }
 
@@ -349,6 +364,23 @@ fn matching_right_parenthesis(tokens: &[LlvmToken], start: usize) -> Option<usiz
     None
 }
 
+fn matching_left_parenthesis(tokens: &[LlvmToken], end: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for index in (0..=end).rev() {
+        match &tokens[index].kind {
+            LlvmTokenKind::RightParenthesis => depth += 1,
+            LlvmTokenKind::LeftParenthesis => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
     matches!(
         tokens[index].kind,
@@ -358,6 +390,96 @@ fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
         .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
 }
 
+/// A constant cast that preserves the identity of the value it wraps, so the
+/// callee it names can still be recovered. `inttoptr` and `ptrtoint` are
+/// excluded: they convert an address, and recovering a callable from one would
+/// require reasoning Gloom's textual evidence does not support.
+fn is_identity_preserving_cast(word: &str) -> bool {
+    matches!(word, "bitcast" | "addrspacecast")
+}
+
+fn is_cast_expression(tokens: &[LlvmToken], index: usize) -> bool {
+    matches!(&tokens[index].kind, LlvmTokenKind::Word(word) if is_identity_preserving_cast(word))
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
+}
+
+/// Recognises a constant cast expression used as the callee operand, as in
+/// `call void bitcast (void (...)* @f to void ()*)()`: the parenthesised cast
+/// is immediately followed by the argument list.
+fn is_cast_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
+    is_cast_expression(tokens, index)
+        && matching_right_parenthesis(tokens, index + 1)
+            .and_then(|end| tokens.get(end + 1))
+            .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
+}
+
+/// Finds the `to` keyword that separates a constant cast's value operand from
+/// its destination type. Nested casts carry their own parentheses, so only the
+/// keyword at the cast's own nesting depth belongs to it.
+fn cast_conversion_keyword(tokens: &[LlvmToken], open: usize, close: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().take(close).skip(open) {
+        match &token.kind {
+            LlvmTokenKind::LeftParenthesis => depth += 1,
+            LlvmTokenKind::RightParenthesis => depth -= 1,
+            LlvmTokenKind::Word(word) if depth == 1 && word == "to" => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The name of the callee operand of a `call` or `invoke` instruction, as the
+/// instruction spells it. Whether the name identifies a callable is a separate
+/// question, answered by resolving it against the module's callable globals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CalleeOperand {
+    /// A global name, reached directly or through identity-preserving casts.
+    Global(String),
+    /// An operand that names no global, such as a register or a computed
+    /// address.
+    Unnamed,
+}
+
+/// Strips identity-preserving constant casts from the callee operand starting
+/// at `index` to reach the value they wrap.
+///
+/// A cast operand is written `<type> <value> to <type>`, so the value is the
+/// token before the cast's own `to`. That value may be another cast, which is
+/// unwrapped in turn.
+fn cast_callee_operand(tokens: &[LlvmToken], index: usize) -> CalleeOperand {
+    let mut cast = index;
+    loop {
+        if !is_cast_expression(tokens, cast) {
+            return CalleeOperand::Unnamed;
+        }
+        let Some(close) = matching_right_parenthesis(tokens, cast + 1) else {
+            return CalleeOperand::Unnamed;
+        };
+        let Some(keyword) = cast_conversion_keyword(tokens, cast + 1, close) else {
+            return CalleeOperand::Unnamed;
+        };
+        let Some(value) = keyword.checked_sub(1).filter(|value| *value > cast + 1) else {
+            return CalleeOperand::Unnamed;
+        };
+        match &tokens[value].kind {
+            LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
+            LlvmTokenKind::RightParenthesis => {
+                let Some(nested) = matching_left_parenthesis(tokens, value)
+                    .and_then(|open| open.checked_sub(1))
+                    .filter(|nested| *nested > cast)
+                else {
+                    return CalleeOperand::Unnamed;
+                };
+                cast = nested;
+            }
+            _ => return CalleeOperand::Unnamed,
+        }
+    }
+}
+
 /// Finds the callee operand of a `call` or `invoke` instruction.
 ///
 /// `tokens` must end at the enclosing function body's closing brace, so the
@@ -365,36 +487,39 @@ fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
 /// than by braces: a literal aggregate return type such as
 /// `call { i32, i32 } @pair()` legitimately contains `}` before the callee.
 ///
-/// The callee is the last `@global(` or `%local(` operand before the argument
-/// list. A named type can also precede a parenthesised list when the
-/// instruction spells out its function type, as in `call %Pair (i32, ...)
-/// @callee(i32 1)`; that operand is a type, not the callee, so the search
-/// continues past its parameter list when another callee-shaped operand
-/// follows it.
-fn call_target(tokens: &[LlvmToken], call_index: usize) -> Option<ObservedCallTarget> {
+/// The callee is the last operand before the argument list: `@global(`,
+/// `%local(`, or a constant cast wrapping either. A named type can also
+/// precede a parenthesised list when the instruction spells out its function
+/// type, as in `call %Pair (i32, ...) @callee(i32 1)`; that operand is a type,
+/// not the callee, so the search continues past its parameter list when
+/// another callee operand follows it.
+fn call_callee_operand(tokens: &[LlvmToken], call_index: usize) -> Option<CalleeOperand> {
     let mut index = call_index + 1;
     while index < tokens.len() {
         match &tokens[index].kind {
             LlvmTokenKind::Word(word) if word == "asm" => return None,
+            LlvmTokenKind::Word(_) if is_cast_callee_operand(tokens, index) => {
+                return Some(cast_callee_operand(tokens, index));
+            }
             LlvmTokenKind::Global(_) | LlvmTokenKind::Local if is_callee_operand(tokens, index) => {
                 let arguments_end = matching_right_parenthesis(tokens, index + 1);
                 if let Some(next) = arguments_end.map(|end| end + 1)
                     && next < tokens.len()
-                    && is_callee_operand(tokens, next)
+                    && (is_callee_operand(tokens, next) || is_cast_callee_operand(tokens, next))
                 {
                     index = next;
                     continue;
                 }
                 return Some(match &tokens[index].kind {
-                    LlvmTokenKind::Global(name) => ObservedCallTarget::Direct(name.clone()),
-                    _ => ObservedCallTarget::Indirect,
+                    LlvmTokenKind::Global(name) => CalleeOperand::Global(name.clone()),
+                    _ => CalleeOperand::Unnamed,
                 });
             }
             LlvmTokenKind::Word(word) if word == "call" || word == "invoke" => break,
             _ => index += 1,
         }
     }
-    Some(ObservedCallTarget::Indirect)
+    Some(CalleeOperand::Unnamed)
 }
 
 fn function_signature_end(tokens: &[LlvmToken], name_index: usize) -> Option<usize> {
@@ -499,14 +624,58 @@ fn is_call_opcode(tokens: &[LlvmToken], index: usize) -> bool {
             .is_some_and(|token| token.kind == LlvmTokenKind::Colon)
 }
 
+/// Reports the callable global defined by a module-scope alias or ifunc, as in
+/// `@aliased = alias void (), ptr @aliasee`.
+///
+/// Aliases and ifuncs are callable globals that no `define` or `declare`
+/// introduces, so a call through one still names a callable. The keyword is
+/// searched for only across the words between the global's name and the first
+/// non-word token, which keeps unrelated globals and their initialisers out.
+fn aliased_callable(tokens: &[LlvmToken], index: usize) -> Option<&str> {
+    let LlvmTokenKind::Global(name) = &tokens[index].kind else {
+        return None;
+    };
+    tokens[index + 1..]
+        .iter()
+        .take_while(|token| matches!(&token.kind, LlvmTokenKind::Word(_)))
+        .any(|token| matches!(&token.kind, LlvmTokenKind::Word(word) if word == "alias" || word == "ifunc"))
+        .then_some(name.as_str())
+}
+
+/// Classifies a parsed callee operand against the module's callable globals.
+///
+/// A global names a direct target only when the module declares, defines, or
+/// aliases it as a callable. A call through a global variable, such as
+/// `@fp = external global ptr` followed by `call void @fp()`, is valid IR that
+/// names no callable, so it stays an indirect call site rather than becoming a
+/// claimed target named after the variable.
+fn resolve_callee(
+    callee: CalleeOperand,
+    callable_globals: &BTreeSet<String>,
+) -> ObservedCallTarget {
+    match callee {
+        CalleeOperand::Global(name) if callable_globals.contains(&name) => {
+            ObservedCallTarget::Direct(name)
+        }
+        _ => ObservedCallTarget::Indirect,
+    }
+}
+
 fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     let tokens = tokenize_llvm_ir(text)?;
     let mut observations = LlvmObservations::default();
+    let mut callable_globals = BTreeSet::new();
+    let mut unresolved_calls: Vec<UnresolvedCall> = Vec::new();
     let mut current = None;
     let mut body_end = 0_usize;
     let mut index = 0;
     while index < tokens.len() {
         if current.is_none() {
+            if let Some(name) = aliased_callable(&tokens, index) {
+                callable_globals.insert(name.to_owned());
+                index += 1;
+                continue;
+            }
             let defined = match &tokens[index].kind {
                 LlvmTokenKind::Word(word) if word == "define" => true,
                 LlvmTokenKind::Word(word) if word == "declare" => false,
@@ -526,6 +695,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
             let LlvmTokenKind::Global(name) = &tokens[name_index].kind else {
                 unreachable!()
             };
+            callable_globals.insert(name.clone());
             observations.functions.push(ObservedFunction {
                 name: name.clone(),
                 defined,
@@ -546,19 +716,30 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
 
         if index == body_end {
             current = None;
-        } else if is_call_opcode(&tokens, index) {
-            if let Some(target) = call_target(&tokens[..body_end], index) {
-                if !matches!(&target, ObservedCallTarget::Direct(name) if name.starts_with("llvm."))
-                {
-                    observations.calls.push(ObservedCall {
-                        caller: current.clone().expect("function body must have a caller"),
-                        target,
-                        line: tokens[index].line,
-                    });
-                }
-            }
+        } else if is_call_opcode(&tokens, index)
+            && let Some(callee) = call_callee_operand(&tokens[..body_end], index)
+        {
+            unresolved_calls.push(UnresolvedCall {
+                caller: current.clone().expect("function body must have a caller"),
+                callee,
+                line: tokens[index].line,
+            });
         }
         index += 1;
+    }
+
+    // Callee operands are resolved after the whole module has been observed:
+    // textual LLVM IR may declare a called function after the call site.
+    for call in unresolved_calls {
+        let target = resolve_callee(call.callee, &callable_globals);
+        if matches!(&target, ObservedCallTarget::Direct(name) if name.starts_with("llvm.")) {
+            continue;
+        }
+        observations.calls.push(ObservedCall {
+            caller: call.caller,
+            target,
+            line: call.line,
+        });
     }
     Ok(observations)
 }
@@ -689,6 +870,31 @@ define i32 @"odd.name"(i32 %n) {
             "main".into(),
             "<indirect>".into(),
             "indirect-call".into()
+        )));
+    }
+
+    const CALLEE_OPERAND_IR: &str = r#"
+@handler = external global ptr
+define void @caller() {
+  call void @handler()
+  call void bitcast (void (...)* @declared_target to void ()*)()
+  ret void
+}
+declare void @declared_target()"#;
+
+    #[test]
+    fn resolves_callee_operands_against_the_module_callables() {
+        let graph = parse_llvm_ir(CALLEE_OPERAND_IR, Some("fixture.ll")).unwrap();
+        assert!(!graph.nodes.contains_key("handler"));
+        assert!(graph.edges.contains_key(&(
+            "caller".into(),
+            "<indirect>".into(),
+            "indirect-call".into()
+        )));
+        assert!(graph.edges.contains_key(&(
+            "caller".into(),
+            "declared_target".into(),
+            "direct-call".into()
         )));
     }
 

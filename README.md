@@ -12,7 +12,10 @@ validates only a small part of that direction.
 
 - Compile one or more C files to textual LLVM IR with Clang.
 - Ingest existing `.ll` files.
-- Extract direct calls and retain unresolved indirect calls explicitly.
+- Extract direct calls and retain unresolved indirect calls explicitly. A call
+  counts as direct only when its callee operand, after constant casts are
+  stripped, names a function, alias, or ifunc the module declares; a call
+  through a global variable stays unresolved.
 - Merge definitions and declarations across inputs.
 - Detect recursive strongly connected components.
 - Query zero-incoming functions, reachability, and shortest call paths.
