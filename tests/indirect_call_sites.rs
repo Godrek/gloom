@@ -1574,7 +1574,7 @@ fn calls_through_an_alias_to_data_stay_unresolved_and_name_no_callable() {
 
 #[test]
 fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
-    let (snapshot, result, _) = llvm_callee_query(
+    let (snapshot, result, lines) = llvm_callee_query(
         "alias-callee-fixture",
         "tests/fixtures/alias-callees.ll",
         "alias_caller",
@@ -1582,7 +1582,12 @@ fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
 
     assert_eq!(
         resolutions(&result),
-        [Resolution::Complete, Resolution::Complete]
+        [
+            Resolution::Complete,
+            Resolution::Complete,
+            Resolution::Complete,
+            Resolution::Complete,
+        ]
     );
     assert_eq!(
         result
@@ -1590,8 +1595,9 @@ fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
             .iter()
             .map(|relationship| relationship.callee_display_name.as_str())
             .collect::<Vec<_>>(),
-        ["aliased", "resolved"]
+        ["aliased", "resolved", "split", "cast_aliased"]
     );
+    assert_eq!(lines, [17, 18, 19, 20]);
 
     let exported: serde_json::Value =
         serde_json::from_str(&Application.export_snapshot_json(&snapshot).unwrap()).unwrap();
@@ -1622,8 +1628,29 @@ fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
             ("alias_caller".to_owned(), "llvm-function".to_owned()),
             ("aliased".to_owned(), "llvm-alias".to_owned()),
             ("aliasee".to_owned(), "llvm-function".to_owned()),
+            ("cast_aliased".to_owned(), "llvm-alias".to_owned()),
             ("resolved".to_owned(), "llvm-ifunc".to_owned()),
             ("resolver".to_owned(), "llvm-function".to_owned()),
+            ("split".to_owned(), "llvm-alias".to_owned()),
+            ("variadic_aliasee".to_owned(), "llvm-function".to_owned()),
         ])
+    );
+}
+
+#[test]
+fn calls_through_an_alias_to_an_unsupported_expression_stay_unresolved() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "select-alias-callee-fixture",
+        "tests/fixtures/select-alias-callee.ll",
+        "select_alias_caller",
+    );
+
+    assert_eq!(resolutions(&result), [Resolution::Absent]);
+    assert!(result.call_sites[0].targets.is_empty());
+    assert!(result.relationships.is_empty());
+    assert_eq!(lines, [9]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from(["function", "select_alias_caller"])
     );
 }

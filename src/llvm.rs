@@ -207,6 +207,9 @@ enum LlvmTokenKind {
     LeftParenthesis,
     RightParenthesis,
     Colon,
+    /// The `=` of a module-scope definition or a local assignment. It marks
+    /// where one module-scope definition ends and the next begins.
+    Equals,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,6 +342,13 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
             b':' => {
                 tokens.push(LlvmToken {
                     kind: LlvmTokenKind::Colon,
+                    line,
+                });
+                index += 1;
+            }
+            b'=' => {
+                tokens.push(LlvmToken {
+                    kind: LlvmTokenKind::Equals,
                     line,
                 });
                 index += 1;
@@ -657,14 +667,17 @@ enum DeclaredGlobal {
 /// `@aliased = alias void (), ptr @aliasee`.
 ///
 /// Aliases and ifuncs are globals that no `define` or `declare` introduces, so
-/// they are collected separately. The keyword is searched for only across the
-/// words between the global's name and the first non-word token, which keeps
-/// unrelated globals and their initialisers out.
+/// they are collected separately. Requiring the `@name =` of a definition, and
+/// reading the keyword only from the words that follow it, keeps unrelated
+/// globals and their initialisers out.
 fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredGlobal)> {
     let LlvmTokenKind::Global(name) = &tokens[index].kind else {
         return None;
     };
-    let (offset, keyword) = tokens[index + 1..]
+    if tokens.get(index + 1)?.kind != LlvmTokenKind::Equals {
+        return None;
+    }
+    let (offset, keyword) = tokens[index + 2..]
         .iter()
         .enumerate()
         .take_while(|(_, token)| matches!(&token.kind, LlvmTokenKind::Word(_)))
@@ -674,34 +687,56 @@ fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredG
     let declaration = match &keyword.kind {
         LlvmTokenKind::Word(word) if word == "ifunc" => DeclaredGlobal::IFunc,
         _ => DeclaredGlobal::Alias {
-            aliasee: alias_aliasee(tokens, index + 1 + offset),
+            aliasee: alias_aliasee(tokens, index + 2 + offset),
         },
     };
     Some((name.as_str(), declaration))
 }
 
-/// The aliasee of an alias definition: the first global or constant cast after
-/// the `alias` keyword.
+/// Finds where the module-scope definition containing `start` ends.
 ///
-/// An alias is written on one line, so the search stops at the end of the
-/// keyword's line rather than running into the next module-scope definition.
-/// An aliasee this does not recognise stays `Unnamed`, which keeps the alias
-/// out of the callable globals instead of guessing at a target.
+/// Every module-scope definition but `define` and `declare` is introduced by a
+/// name and an `=`, so the next such pair, or the next function, bounds the
+/// current one. Definitions are bounded by tokens rather than by lines: an
+/// alias may be written across several lines.
+fn module_definition_end(tokens: &[LlvmToken], start: usize) -> usize {
+    (start..tokens.len())
+        .find(|index| {
+            matches!(&tokens[*index].kind, LlvmTokenKind::Word(word) if word == "define" || word == "declare")
+                || tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.kind == LlvmTokenKind::Equals)
+        })
+        .unwrap_or(tokens.len())
+}
+
+/// The aliasee of an alias definition, parsed from the tokens between the
+/// `alias` keyword and the end of the definition.
+///
+/// Only two shapes name a callable: a bare global, and an identity-preserving
+/// cast wrapping one. The aliasee is the definition's last operand, so it is
+/// read from the end. Every other constant expression — `select`,
+/// `getelementptr`, `inttoptr`, and the rest — fails closed as `Unnamed`:
+/// deciding which of a `select`'s operands the alias resolves to is reasoning
+/// this evidence does not support, and guessing one would publish a target
+/// claim the module does not make.
 fn alias_aliasee(tokens: &[LlvmToken], keyword: usize) -> CalleeOperand {
-    let line = tokens[keyword].line;
-    for index in keyword + 1..tokens.len() {
-        if tokens[index].line != line {
-            break;
-        }
-        match &tokens[index].kind {
-            LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
-            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
-                return cast_callee_operand(tokens, index);
-            }
-            _ => {}
-        }
+    let Some(last) = module_definition_end(tokens, keyword + 1)
+        .checked_sub(1)
+        .filter(|last| *last > keyword)
+    else {
+        return CalleeOperand::Unnamed;
+    };
+    match &tokens[last].kind {
+        LlvmTokenKind::Global(name) => CalleeOperand::Global(name.clone()),
+        LlvmTokenKind::RightParenthesis => matching_left_parenthesis(tokens, last)
+            .and_then(|open| open.checked_sub(1))
+            .filter(|head| *head > keyword)
+            .map_or(CalleeOperand::Unnamed, |head| {
+                cast_callee_operand(tokens, head)
+            }),
+        _ => CalleeOperand::Unnamed,
     }
-    CalleeOperand::Unnamed
 }
 
 /// Classifies a parsed callee operand against the module's declared globals.
@@ -984,6 +1019,9 @@ define i32 @"odd.name"(i32 %n) {
 @data = global i8 0
 @data_alias = alias i8, ptr @data
 @function_alias = alias void (), ptr @declared_target
+@select_alias = alias void (), ptr select (i1 false, ptr @declared_target, ptr @data)
+@split_alias = alias void (),
+    ptr @declared_target
 @cycle = alias void (), ptr @other_cycle
 @other_cycle = alias void (), ptr @cycle
 define void @caller() {
@@ -991,6 +1029,8 @@ define void @caller() {
   call void bitcast (void (...)* @declared_target to void ()*)()
   call void @data_alias()
   call void @function_alias()
+  call void @select_alias()
+  call void @split_alias()
   call void @cycle()
   ret void
 }
@@ -999,7 +1039,14 @@ declare void @declared_target()"#;
     #[test]
     fn resolves_callee_operands_against_the_module_declarations() {
         let graph = parse_llvm_ir(CALLEE_OPERAND_IR, Some("fixture.ll")).unwrap();
-        for uncallable in ["handler", "data", "data_alias", "cycle", "other_cycle"] {
+        for uncallable in [
+            "handler",
+            "data",
+            "data_alias",
+            "select_alias",
+            "cycle",
+            "other_cycle",
+        ] {
             assert!(!graph.nodes.contains_key(uncallable));
         }
         assert!(graph.edges.contains_key(&(
@@ -1007,7 +1054,7 @@ declare void @declared_target()"#;
             "<indirect>".into(),
             "indirect-call".into()
         )));
-        for callable in ["declared_target", "function_alias"] {
+        for callable in ["declared_target", "function_alias", "split_alias"] {
             assert!(graph.edges.contains_key(&(
                 "caller".into(),
                 callable.into(),
@@ -1016,7 +1063,7 @@ declare void @declared_target()"#;
         }
         assert_eq!(
             graph.edges[&("caller".into(), "<indirect>".into(), "indirect-call".into())].call_count,
-            3
+            4
         );
     }
 
