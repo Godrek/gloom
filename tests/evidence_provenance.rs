@@ -947,3 +947,136 @@ fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_reje
         "unexpected error: {ambiguous}"
     );
 }
+
+/// Rewrites every reference to one acquired-input identity in an exported
+/// snapshot, so a hand-edited input is internally consistent and the load has
+/// to reject it on ownership grounds rather than on a dangling reference.
+fn rebind_acquired_input(
+    exported: &mut serde_json::Value,
+    from: &serde_json::Value,
+    to: &serde_json::Value,
+) {
+    for input in exported["acquired_inputs"].as_array_mut().unwrap() {
+        if input["id"] == *from {
+            input["id"] = to.clone();
+        }
+    }
+    rebind_acquired_input_records(exported, from, to);
+}
+
+/// Moves the records read from one acquired input onto another, leaving the
+/// acquired inputs themselves alone.
+fn rebind_acquired_input_records(
+    exported: &mut serde_json::Value,
+    from: &serde_json::Value,
+    to: &serde_json::Value,
+) {
+    for record in exported["evidence_records"].as_array_mut().unwrap() {
+        if record["acquired_input_id"] == *from {
+            record["acquired_input_id"] = to.clone();
+        }
+        if record["source_location"]["input_id"] == *from {
+            record["source_location"]["input_id"] = to.clone();
+        }
+    }
+    for manifestation in exported["manifestations"].as_array_mut().unwrap() {
+        if manifestation["acquired_input_id"] == *from {
+            manifestation["acquired_input_id"] = to.clone();
+        }
+    }
+    for entity in exported["program_entities"].as_array_mut().unwrap() {
+        if entity["source_location"]["input_id"] == *from {
+            entity["source_location"]["input_id"] = to.clone();
+        }
+    }
+    for claim in exported["correspondence_claims"].as_array_mut().unwrap() {
+        if claim["acquired_input_id"] == *from {
+            claim["acquired_input_id"] = to.clone();
+        }
+    }
+}
+
+#[test]
+fn forged_or_misnumbered_acquired_inputs_are_rejected_on_load() {
+    let application = Application;
+    let snapshot = publish_static_and_trace(TraceAttachment::Attached).unwrap();
+    let exported: serde_json::Value =
+        serde_json::from_str(&application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    let load = |value: &serde_json::Value| {
+        application
+            .load_snapshot_json(&serde_json::to_string(value).unwrap())
+            .unwrap_err()
+    };
+    let input_id = |path: &str| {
+        serde_json::json!(
+            snapshot
+                .acquired_inputs()
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap()
+                .id
+        )
+    };
+    let trace_input_id = input_id(TRACE_INPUT);
+    let static_input = exported["acquired_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|input| input["path"] == serde_json::json!(STATIC_INPUT))
+        .unwrap()
+        .clone();
+
+    // A forged acquired input carrying the static artifact, with the runtime
+    // evidence and its manifestation rebound to it and their own identities
+    // untouched, would report the runtime observation as static provenance.
+    let mut forged = exported.clone();
+    let mut forged_input = static_input.clone();
+    forged_input["id"] = serde_json::json!("forged:1");
+    forged["acquired_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(forged_input);
+    rebind_acquired_input_records(&mut forged, &trace_input_id, &serde_json::json!("forged:1"));
+    let error = load(&forged);
+    assert!(
+        error.contains("acquired input 'forged:1' is not identified as")
+            && error.contains("at position 2"),
+        "unexpected error: {error}"
+    );
+
+    // The same forgery with a well-formed identity does not get further: the
+    // records rebound to it were published from acquired input 1, and their
+    // core identities say so.
+    let mut well_formed_forgery = exported.clone();
+    let mut appended_input = static_input;
+    let appended_id = serde_json::json!(format!(
+        "input:{}:2",
+        snapshot.program_snapshot().id.as_str()
+    ));
+    appended_input["id"] = appended_id.clone();
+    well_formed_forgery["acquired_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(appended_input);
+    rebind_acquired_input_records(&mut well_formed_forgery, &trace_input_id, &appended_id);
+    let error = load(&well_formed_forgery);
+    assert!(
+        error.contains("was not published from acquired input"),
+        "unexpected error: {error}"
+    );
+
+    // An input identity naming the wrong position, or another program
+    // snapshot, is rejected even when every reference to it is consistent.
+    for wrong in [
+        format!("input:{}:7", snapshot.program_snapshot().id.as_str()),
+        "input:snapshot:another-program:1".to_string(),
+    ] {
+        let mut misnumbered = exported.clone();
+        rebind_acquired_input(&mut misnumbered, &trace_input_id, &serde_json::json!(wrong));
+        let error = load(&misnumbered);
+        assert!(
+            error.contains("is not identified as") && error.contains("at position 1"),
+            "unexpected error for {wrong}: {error}"
+        );
+    }
+}

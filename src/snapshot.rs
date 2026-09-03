@@ -640,9 +640,14 @@ impl PublishedSnapshot {
                 ));
             }
         }
-        for input in &self.acquired_inputs {
+        // An acquired input is identified by its program snapshot and its
+        // position in this snapshot's acquisition order, and nothing else. An
+        // identity of any other shape is rejected outright, so a hand-edited
+        // export cannot introduce an input the core never published and
+        // re-attribute evidence to it.
+        let mut input_indexes = BTreeMap::new();
+        for (index, input) in self.acquired_inputs.iter().enumerate() {
             for (field, value) in [
-                ("identity", input.id.as_str()),
                 ("path", input.path.as_str()),
                 ("evidence artifact", input.evidence_artifact.as_str()),
                 ("media type", input.media_type.as_str()),
@@ -653,6 +658,14 @@ impl PublishedSnapshot {
                     return Err(format!("acquired input {field} cannot be empty"));
                 }
             }
+            let qualified = acquired_input_id(&self.program_snapshot.id, index);
+            if input.id != qualified {
+                return Err(format!(
+                    "acquired input '{}' is not identified as '{qualified}', the input this program snapshot acquired at position {index}",
+                    input.id
+                ));
+            }
+            input_indexes.insert(input.id.as_str(), index);
         }
         let inputs_by_id: BTreeMap<_, _> = self
             .acquired_inputs
@@ -720,8 +733,11 @@ impl PublishedSnapshot {
                     manifestation.id, manifestation.acquired_input_id
                 ));
             }
-            if !identity_names_acquired_input(
+            if !identity_belongs_to_acquired_input(
                 manifestation.id.as_str(),
+                "manifestation",
+                &self.program_snapshot.id,
+                &input_indexes,
                 &manifestation.acquired_input_id,
             ) {
                 return Err(format!(
@@ -804,7 +820,13 @@ impl PublishedSnapshot {
                             entity.id
                         ));
                     }
-                    if !identity_names_acquired_input(entity.id.as_str(), &location.input_id) {
+                    if !identity_belongs_to_acquired_input(
+                        entity.id.as_str(),
+                        "entity",
+                        &self.program_snapshot.id,
+                        &input_indexes,
+                        &location.input_id,
+                    ) {
                         return Err(format!(
                             "call site '{}' was not published from acquired input '{}'",
                             entity.id, location.input_id
@@ -883,7 +905,13 @@ impl PublishedSnapshot {
                     evidence.id
                 ));
             }
-            if !identity_names_acquired_input(evidence.id.as_str(), &evidence.acquired_input_id) {
+            if !identity_belongs_to_acquired_input(
+                evidence.id.as_str(),
+                "evidence",
+                &self.program_snapshot.id,
+                &input_indexes,
+                &evidence.acquired_input_id,
+            ) {
                 return Err(format!(
                     "evidence '{}' was not published from acquired input '{}'",
                     evidence.id, evidence.acquired_input_id
@@ -1623,15 +1651,28 @@ fn contributed_evidence_record(
     }
 }
 
-/// Core-generated identities embed the index of the acquired input they were
-/// published from. Checking that against the input a record claims keeps a
-/// hand-edited export from moving one record's provenance to another input
-/// while the rest of the snapshot still refers to it by its original identity.
-fn identity_names_acquired_input(id: &str, acquired_input_id: &AcquiredInputId) -> bool {
-    acquired_input_id
-        .as_str()
-        .rsplit_once(':')
-        .is_some_and(|(_, index)| id.contains(&format!(":input:{index}:")))
+/// The only identity an acquired input can have: its program snapshot and its
+/// position in that snapshot's acquisition order.
+fn acquired_input_id(snapshot_id: &ProgramSnapshotId, input_index: usize) -> AcquiredInputId {
+    AcquiredInputId::new(format!("input:{snapshot_id}:{input_index}"))
+}
+
+/// Core-generated identities are qualified by the program snapshot and the
+/// acquired input they were published from: `{kind}:{snapshot}:input:{index}:…`.
+/// Requiring that exact prefix, rather than matching a suffix of the input
+/// identity, is what stops a hand-edited export from pointing a record at a
+/// forged or foreign acquired input while keeping the identity the rest of the
+/// snapshot refers to it by.
+fn identity_belongs_to_acquired_input(
+    id: &str,
+    kind: &str,
+    snapshot_id: &ProgramSnapshotId,
+    input_indexes: &BTreeMap<&str, usize>,
+    acquired_input_id: &AcquiredInputId,
+) -> bool {
+    input_indexes
+        .get(acquired_input_id.as_str())
+        .is_some_and(|index| id.starts_with(&format!("{kind}:{snapshot_id}:input:{index}:")))
 }
 
 fn call_site_explanation_handle(call_site_id: &ProgramEntityId) -> ExplanationHandle {
@@ -1697,7 +1738,7 @@ pub(crate) fn publish(
     > = BTreeMap::new();
 
     for (input_index, contribution) in contributions.into_iter().enumerate() {
-        let input_id = AcquiredInputId::new(format!("input:{snapshot_id}:{input_index}"));
+        let input_id = acquired_input_id(&snapshot_id, input_index);
         let path_text = contribution.input.path.clone();
         let evidence_artifact = contribution.input.evidence_artifact.clone();
         let content_fingerprint = contribution.input.content_fingerprint.clone();
