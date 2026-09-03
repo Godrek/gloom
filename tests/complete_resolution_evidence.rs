@@ -60,13 +60,28 @@ fn evidence(
     }
 }
 
-fn callable(contributor_callable_id: &str, context: &ObservationContext) -> ContributedCallable {
+fn callable(
+    contributor_callable_id: &str,
+    line: usize,
+    context: &ObservationContext,
+) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: contributor_callable_id.into(),
         display_name: contributor_callable_id.into(),
         defined: true,
         representation: "fixture-callable".into(),
         observation_context_id: context.id.clone(),
+        line,
+        identity_evidence: evidence(
+            "fixture-callable-identity",
+            if context.runtime_workload.is_some() {
+                EvidenceScope::Runtime
+            } else {
+                EvidenceScope::Static
+            },
+            EvidenceSupport::ContributorIdentity,
+            None,
+        ),
     }
 }
 
@@ -139,10 +154,10 @@ impl EvidenceContributor for DispatchFixture {
             },
             observation_contexts: vec![context.clone(), traced_context.clone()],
             callables: vec![
-                callable("dispatch", context),
-                callable("static_target", context),
-                callable("dispatch", &traced_context),
-                callable("traced_target", &traced_context),
+                callable("dispatch", 10, context),
+                callable("static_target", 11, context),
+                callable("dispatch", 12, &traced_context),
+                callable("traced_target", 13, &traced_context),
             ],
             call_sites: vec![
                 call_site(
@@ -610,4 +625,36 @@ fn a_call_through_a_data_global_declares_no_completeness() {
             .iter()
             .all(|evidence| evidence.completeness_basis.is_none())
     );
+}
+
+/// Contributor-identity evidence stands outside the call-site resolution rules:
+/// no resolution references it, and it may not declare completeness.
+#[test]
+fn contributor_identity_evidence_is_exempt_from_the_resolution_rules() {
+    let application = Application;
+    let snapshot = published_fixture();
+    let identity_ids = snapshot
+        .evidence_records()
+        .iter()
+        .filter(|evidence| evidence.support == EvidenceSupport::ContributorIdentity)
+        .map(|evidence| evidence.id.clone())
+        .collect::<Vec<_>>();
+
+    assert!(!identity_ids.is_empty());
+    assert!(snapshot.call_site_resolutions().iter().all(|resolution| {
+        resolution
+            .evidence_ids
+            .iter()
+            .all(|evidence_id| !identity_ids.contains(evidence_id))
+    }));
+    application
+        .load_snapshot_json(&application.export_snapshot_json(&snapshot).unwrap())
+        .unwrap();
+
+    let identity_id = serde_json::json!(identity_ids[0]);
+    let error = load_error(export(&snapshot), |exported| {
+        evidence_record(exported, &identity_id)["completeness_basis"] =
+            serde_json::to_value(basis()).unwrap();
+    });
+    assert!(error.contains(MISPLACED_BASIS), "unexpected error: {error}");
 }
