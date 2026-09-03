@@ -7,6 +7,7 @@ declare void @variadic_aliasee(...)
     ptr @aliasee
 @cast_aliased = alias void (), ptr bitcast (void (...)* @variadic_aliasee to void ()*)
 @partitioned = alias void (), ptr @aliasee, partition "review"
+@wrapped = alias void (), ptr no_cfi @aliasee, partition "review"
 @before_module_asm = alias void (), ptr @aliasee
 
 module asm ""
@@ -23,6 +24,7 @@ entry:
   call void @split()
   call void @cast_aliased()
   call void @partitioned()
+  call void @wrapped()
   call void @before_module_asm()
   call void @before_attributes()
   ret void

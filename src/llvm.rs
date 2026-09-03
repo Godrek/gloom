@@ -422,15 +422,6 @@ fn matching_left_parenthesis(tokens: &[LlvmToken], end: usize) -> Option<usize> 
     None
 }
 
-fn is_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
-    matches!(
-        tokens[index].kind,
-        LlvmTokenKind::Global(_) | LlvmTokenKind::Local
-    ) && tokens
-        .get(index + 1)
-        .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
-}
-
 /// A constant cast that preserves the identity of the value it wraps, so the
 /// callee it names can still be recovered. `inttoptr` and `ptrtoint` are
 /// excluded: they convert an address, and recovering a callable from one would
@@ -446,14 +437,12 @@ fn is_cast_expression(tokens: &[LlvmToken], index: usize) -> bool {
             .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
 }
 
-/// Recognises a constant cast expression used as the callee operand, as in
-/// `call void bitcast (void (...)* @f to void ()*)()`: the parenthesised cast
-/// is immediately followed by the argument list.
-fn is_cast_callee_operand(tokens: &[LlvmToken], index: usize) -> bool {
-    is_cast_expression(tokens, index)
-        && matching_right_parenthesis(tokens, index + 1)
-            .and_then(|end| tokens.get(end + 1))
-            .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
+/// A named wrapper that yields the function it wraps. Per the LangRef,
+/// `dso_local_equivalent @f` is a function equivalent to `@f` — a dso-local
+/// stub that jumps to it — and `no_cfi @f` is `@f`'s address without CFI
+/// checks. A call through either invokes `@f`.
+fn is_identity_preserving_wrapper(word: &str) -> bool {
+    matches!(word, "dso_local_equivalent" | "no_cfi")
 }
 
 /// Finds the `to` keyword that separates a constant cast's value operand from
@@ -484,41 +473,82 @@ enum CalleeOperand {
     Unnamed,
 }
 
-/// Strips identity-preserving constant casts from the callee operand starting
-/// at `index` to reach the value they wrap.
+/// The global an operand names, or `Unnamed` when it names none.
 ///
-/// A cast operand is written `<type> <value> to <type>`, so the value is the
-/// token before the cast's own `to`. That value may be another cast, which is
-/// unwrapped in turn.
-fn cast_callee_operand(tokens: &[LlvmToken], index: usize) -> CalleeOperand {
-    let mut cast = index;
+/// Exactly four operand shapes name a global:
+///
+/// - a bare global, `@f`;
+/// - `bitcast (<type> <operand> to <type>)` and `addrspacecast (...)`, which
+///   preserve the identity of the operand they wrap;
+/// - `dso_local_equivalent <operand>`, a function equivalent to the one it
+///   wraps;
+/// - `no_cfi <operand>`, the wrapped function's address without CFI checks.
+///
+/// Every other head — `select`, `getelementptr`, `inttoptr`, `ptrtoint`,
+/// `blockaddress`, any other keyword or expression — fails closed, with no
+/// scan past it for a global inside: which global such an expression yields is
+/// reasoning this evidence does not support, and guessing one would publish a
+/// target claim the module does not make.
+fn operand_global(tokens: &[LlvmToken], index: usize) -> CalleeOperand {
+    let mut index = index;
     loop {
-        if !is_cast_expression(tokens, cast) {
-            return CalleeOperand::Unnamed;
-        }
-        let Some(close) = matching_right_parenthesis(tokens, cast + 1) else {
+        let Some(token) = tokens.get(index) else {
             return CalleeOperand::Unnamed;
         };
-        let Some(keyword) = cast_conversion_keyword(tokens, cast + 1, close) else {
-            return CalleeOperand::Unnamed;
-        };
-        let Some(value) = keyword.checked_sub(1).filter(|value| *value > cast + 1) else {
-            return CalleeOperand::Unnamed;
-        };
-        match &tokens[value].kind {
+        match &token.kind {
             LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
-            LlvmTokenKind::RightParenthesis => {
-                let Some(nested) = matching_left_parenthesis(tokens, value)
-                    .and_then(|open| open.checked_sub(1))
-                    .filter(|nested| *nested > cast)
-                else {
+            LlvmTokenKind::Word(word) if is_identity_preserving_wrapper(word) => index += 1,
+            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
+                let Some(value) = cast_value_operand(tokens, index) else {
                     return CalleeOperand::Unnamed;
                 };
-                cast = nested;
+                index = value;
             }
             _ => return CalleeOperand::Unnamed,
         }
     }
+}
+
+/// Where the value operand of the constant cast at `index` begins.
+///
+/// A cast is written `<type> <value> to <type>`, so the value ends just before
+/// the cast's own `to`. A parenthesised value is another expression, whose own
+/// head begins just before its opening parenthesis.
+fn cast_value_operand(tokens: &[LlvmToken], index: usize) -> Option<usize> {
+    let close = matching_right_parenthesis(tokens, index + 1)?;
+    let keyword = cast_conversion_keyword(tokens, index + 1, close)?;
+    let value = keyword.checked_sub(1).filter(|value| *value > index + 1)?;
+    match &tokens[value].kind {
+        LlvmTokenKind::RightParenthesis => matching_left_parenthesis(tokens, value)
+            .and_then(|open| open.checked_sub(1))
+            .filter(|head| *head > index),
+        _ => Some(value),
+    }
+}
+
+/// Where the operand starting at `index` ends, for the four shapes
+/// [`operand_global`] accepts, plus a register. Used to tell an operand
+/// followed by an argument list from one followed by anything else.
+fn operand_end(tokens: &[LlvmToken], index: usize) -> Option<usize> {
+    let mut index = index;
+    loop {
+        match &tokens.get(index)?.kind {
+            LlvmTokenKind::Global(_) | LlvmTokenKind::Local => return Some(index + 1),
+            LlvmTokenKind::Word(word) if is_identity_preserving_wrapper(word) => index += 1,
+            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
+                return Some(matching_right_parenthesis(tokens, index + 1)? + 1);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether an operand starting at `index` is followed by a parenthesised list,
+/// which at a call is either the argument list or a spelled-out function type.
+fn operand_precedes_list(tokens: &[LlvmToken], index: usize) -> bool {
+    operand_end(tokens, index)
+        .and_then(|end| tokens.get(end))
+        .is_some_and(|token| token.kind == LlvmTokenKind::LeftParenthesis)
 }
 
 /// Finds the callee operand of a `call` or `invoke` instruction.
@@ -528,37 +558,32 @@ fn cast_callee_operand(tokens: &[LlvmToken], index: usize) -> CalleeOperand {
 /// than by braces: a literal aggregate return type such as
 /// `call { i32, i32 } @pair()` legitimately contains `}` before the callee.
 ///
-/// The callee is the last operand before the argument list: `@global(`,
-/// `%local(`, or a constant cast wrapping either. A named type can also
+/// The callee is the operand immediately before the argument list, in the
+/// shapes [`operand_global`] accepts, or a register. A named type can also
 /// precede a parenthesised list when the instruction spells out its function
 /// type, as in `call %Pair (i32, ...) @callee(i32 1)`; that operand is a type,
 /// not the callee, so the search continues past its parameter list when
-/// another callee operand follows it.
+/// another operand precedes a list after it.
 fn call_callee_operand(tokens: &[LlvmToken], call_index: usize) -> Option<CalleeOperand> {
     let mut index = call_index + 1;
     while index < tokens.len() {
         match &tokens[index].kind {
             LlvmTokenKind::Word(word) if word == "asm" => return None,
-            LlvmTokenKind::Word(_) if is_cast_callee_operand(tokens, index) => {
-                return Some(cast_callee_operand(tokens, index));
-            }
-            LlvmTokenKind::Global(_) | LlvmTokenKind::Local if is_callee_operand(tokens, index) => {
-                let arguments_end = matching_right_parenthesis(tokens, index + 1);
-                if let Some(next) = arguments_end.map(|end| end + 1)
-                    && next < tokens.len()
-                    && (is_callee_operand(tokens, next) || is_cast_callee_operand(tokens, next))
-                {
-                    index = next;
-                    continue;
-                }
-                return Some(match &tokens[index].kind {
-                    LlvmTokenKind::Global(name) => CalleeOperand::Global(name.clone()),
-                    _ => CalleeOperand::Unnamed,
-                });
-            }
             LlvmTokenKind::Word(word) if word == "call" || word == "invoke" => break,
-            _ => index += 1,
+            _ => {}
         }
+        if operand_precedes_list(tokens, index) {
+            let list = operand_end(tokens, index).expect("operand precedes a list");
+            if let Some(next) = matching_right_parenthesis(tokens, list).map(|end| end + 1)
+                && next < tokens.len()
+                && operand_precedes_list(tokens, next)
+            {
+                index = next;
+                continue;
+            }
+            return Some(operand_global(tokens, index));
+        }
+        index += 1;
     }
     Some(CalleeOperand::Unnamed)
 }
@@ -739,44 +764,39 @@ fn module_definition_end(tokens: &[LlvmToken], start: usize) -> usize {
 /// optional trailing clause such as `, partition "..."`, so the aliasee is the
 /// operand after the comma that ends the aliasee type, not the definition's
 /// last token: a trailing clause, or a following `module asm` or `attributes`
-/// block, must not hide it.
-///
-/// Only two operand shapes name a callable: a bare global, and an
-/// identity-preserving cast wrapping one. Type syntax on the way to the
-/// operand — a parenthesised function type, a braced struct type — is stepped
-/// over by depth. Every other constant expression, such as `select` or
-/// `getelementptr`, fails closed as `Unnamed`: deciding which of a `select`'s
-/// operands the alias resolves to is reasoning this evidence does not support,
-/// and guessing one would publish a target claim the module does not make.
+/// block, must not hide it. The pointer type before the operand is stepped
+/// over as a type, and the operand itself is read exactly, in the shapes
+/// [`operand_global`] accepts. Any other head fails closed as `Unnamed`.
 fn alias_aliasee(tokens: &[LlvmToken], keyword: usize) -> CalleeOperand {
     let end = module_definition_end(tokens, keyword + 1);
-    let Some(operand) = type_separator(tokens, keyword + 1, end).map(|comma| comma + 1) else {
+    let Some(operand) =
+        type_separator(tokens, keyword + 1, end).and_then(|comma| type_end(tokens, comma + 1, end))
+    else {
         return CalleeOperand::Unnamed;
     };
-    let mut index = operand;
-    while index < end {
-        match &tokens[index].kind {
-            LlvmTokenKind::Global(name) => return CalleeOperand::Global(name.clone()),
-            LlvmTokenKind::Comma => return CalleeOperand::Unnamed,
-            LlvmTokenKind::Word(_) if is_cast_expression(tokens, index) => {
-                return cast_callee_operand(tokens, index);
-            }
-            LlvmTokenKind::LeftParenthesis => {
-                let Some(close) = matching_right_parenthesis(tokens, index) else {
-                    return CalleeOperand::Unnamed;
-                };
-                index = close + 1;
-            }
-            LlvmTokenKind::LeftBrace => {
-                let Some(close) = matching_right_brace(tokens, index) else {
-                    return CalleeOperand::Unnamed;
-                };
-                index = close + 1;
-            }
-            _ => index += 1,
-        }
+    if operand >= end {
+        return CalleeOperand::Unnamed;
     }
-    CalleeOperand::Unnamed
+    operand_global(tokens, operand)
+}
+
+/// Where the type starting at `index` ends: a named or primitive type, a
+/// braced struct type, or a function type with its parenthesised parameter
+/// list. Pointer stars carry no token, so `void ()*` ends with its parameter
+/// list and `ptr` with itself.
+fn type_end(tokens: &[LlvmToken], index: usize, end: usize) -> Option<usize> {
+    if index >= end {
+        return None;
+    }
+    let mut next = match &tokens[index].kind {
+        LlvmTokenKind::Word(_) | LlvmTokenKind::Local => index + 1,
+        LlvmTokenKind::LeftBrace => matching_right_brace(tokens, index)? + 1,
+        _ => return None,
+    };
+    while next < end && tokens[next].kind == LlvmTokenKind::LeftParenthesis {
+        next = matching_right_parenthesis(tokens, next)? + 1;
+    }
+    Some(next)
 }
 
 /// Finds the comma that ends an alias's aliasee type, skipping the commas
