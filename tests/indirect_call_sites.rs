@@ -2,10 +2,10 @@ use gloom::app::{Application, NamedQuery};
 use gloom::{
     CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CompletenessBasis,
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
-    ProgramEntityKind, Resolution,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
+    ObservationContext, ProgramEntityKind, Resolution,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -28,12 +28,18 @@ fn evidence(
     evidence_type: &str,
     scope: EvidenceScope,
     support: EvidenceSupport,
+    evidence_artifact: &str,
+    line: usize,
 ) -> ContributedEvidence {
     ContributedEvidence {
         evidence_type: evidence_type.into(),
         scope,
         support,
         completeness_basis: None,
+        location: ContributedEvidenceLocation {
+            evidence_artifact: evidence_artifact.into(),
+            line,
+        },
     }
 }
 
@@ -77,10 +83,11 @@ impl EvidenceContributor for PossibleTargetsFixture {
             "runtime target tracing",
             "dispatch fixture workload",
         );
+        let artifact = input.display().to_string();
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
-                evidence_artifact: input.display().to_string(),
+                evidence_artifact: artifact.clone(),
                 media_type: "application/x-gloom-fixture".into(),
                 acquisition_method: "semantic-fixture".into(),
                 content_fingerprint: "fixture:possible-targets".into(),
@@ -100,6 +107,8 @@ impl EvidenceContributor for PossibleTargetsFixture {
                         "static-callable-identity",
                         EvidenceScope::Static,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        index + 1,
                     ),
                 })
                 .chain([ContributedCallable {
@@ -113,10 +122,13 @@ impl EvidenceContributor for PossibleTargetsFixture {
                         "runtime-callable-identity",
                         EvidenceScope::Runtime,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        4,
                     ),
                 }])
                 .collect(),
             call_sites: vec![ContributedCallSite {
+                contributor_call_site_id: ContributorCallSiteId::new("dispatch:7").unwrap(),
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "dispatch".into(),
                 line: 7,
@@ -126,6 +138,8 @@ impl EvidenceContributor for PossibleTargetsFixture {
                     "static-indirect-call",
                     EvidenceScope::Static,
                     EvidenceSupport::CallSiteResolution,
+                    &artifact,
+                    7,
                 ),
                 target_claims: vec![
                     ContributedTargetClaim {
@@ -137,6 +151,8 @@ impl EvidenceContributor for PossibleTargetsFixture {
                             "static-possible-target",
                             EvidenceScope::Static,
                             EvidenceSupport::TargetClaim,
+                            &artifact,
+                            7,
                         )],
                     },
                     ContributedTargetClaim {
@@ -148,6 +164,8 @@ impl EvidenceContributor for PossibleTargetsFixture {
                             "runtime-observed-target",
                             EvidenceScope::Runtime,
                             EvidenceSupport::TargetClaim,
+                            &artifact,
+                            7,
                         )],
                     },
                     ContributedTargetClaim {
@@ -159,10 +177,13 @@ impl EvidenceContributor for PossibleTargetsFixture {
                             "static-possible-target",
                             EvidenceScope::Static,
                             EvidenceSupport::TargetClaim,
+                            &artifact,
+                            7,
                         )],
                     },
                 ],
             }],
+            call_site_attachments: Vec::new(),
         })
     }
 }
@@ -197,10 +218,11 @@ impl EvidenceContributor for SameLabelCallersFixture {
             "runtime tracing",
             "same-label workload",
         );
+        let artifact = input.display().to_string();
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
-                evidence_artifact: input.display().to_string(),
+                evidence_artifact: artifact.clone(),
                 media_type: "application/x-gloom-fixture".into(),
                 acquisition_method: "semantic-fixture".into(),
                 content_fingerprint: "fixture:same-label-callers".into(),
@@ -218,6 +240,8 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "static-callable-identity",
                         EvidenceScope::Static,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        1,
                     ),
                 },
                 ContributedCallable {
@@ -231,6 +255,8 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "static-callable-identity",
                         EvidenceScope::Static,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        2,
                     ),
                 },
                 ContributedCallable {
@@ -244,11 +270,15 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "runtime-callable-identity",
                         EvidenceScope::Runtime,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        3,
                     ),
                 },
             ],
             call_sites: vec![
                 ContributedCallSite {
+                    contributor_call_site_id: ContributorCallSiteId::new("static-worker-a:1")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "static-worker-a".into(),
                     line: 1,
@@ -258,10 +288,14 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "static-indirect-call",
                         EvidenceScope::Static,
                         EvidenceSupport::CallSiteResolution,
+                        &artifact,
+                        1,
                     ),
                     target_claims: Vec::new(),
                 },
                 ContributedCallSite {
+                    contributor_call_site_id: ContributorCallSiteId::new("static-worker-b:2")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "static-worker-b".into(),
                     line: 2,
@@ -271,10 +305,14 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "static-indirect-call",
                         EvidenceScope::Static,
                         EvidenceSupport::CallSiteResolution,
+                        &artifact,
+                        2,
                     ),
                     target_claims: Vec::new(),
                 },
                 ContributedCallSite {
+                    contributor_call_site_id: ContributorCallSiteId::new("runtime-worker:3")
+                        .unwrap(),
                     kind: ContributedCallKind::Indirect,
                     caller_callable_id: "runtime-worker".into(),
                     line: 3,
@@ -284,10 +322,13 @@ impl EvidenceContributor for SameLabelCallersFixture {
                         "runtime-indirect-call",
                         EvidenceScope::Runtime,
                         EvidenceSupport::CallSiteResolution,
+                        &artifact,
+                        3,
                     ),
                     target_claims: Vec::new(),
                 },
             ],
+            call_site_attachments: Vec::new(),
         })
     }
 }
@@ -312,10 +353,11 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
         input: &Path,
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
+        let artifact = input.display().to_string();
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
-                evidence_artifact: input.display().to_string(),
+                evidence_artifact: artifact.clone(),
                 media_type: "application/x-gloom-fixture".into(),
                 acquisition_method: "semantic-fixture".into(),
                 content_fingerprint: "fixture:invalid-runtime-scope".into(),
@@ -335,10 +377,13 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                         "static-callable-identity",
                         EvidenceScope::Static,
                         EvidenceSupport::ContributorIdentity,
+                        &artifact,
+                        index + 1,
                     ),
                 })
                 .collect(),
             call_sites: vec![ContributedCallSite {
+                contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Indirect,
                 caller_callable_id: "caller".into(),
                 line: 1,
@@ -350,6 +395,8 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                         "static-indirect-call",
                         EvidenceScope::Static,
                         EvidenceSupport::CallSiteResolution,
+                        &artifact,
+                        1,
                     )
                 },
                 target_claims: vec![ContributedTargetClaim {
@@ -361,9 +408,12 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                         "runtime-observed-target",
                         EvidenceScope::Runtime,
                         EvidenceSupport::TargetClaim,
+                        &artifact,
+                        1,
                     )],
                 }],
             }],
+            call_site_attachments: Vec::new(),
         })
     }
 }
@@ -1319,7 +1369,7 @@ fn loaded_snapshots_revalidate_derivation_rules_and_call_site_locations() {
         serde_json::json!(0);
     let error = load(&zero_line_entity);
     assert!(
-        error.contains("has no source line"),
+        error.contains("has no location within its evidence artifact"),
         "unexpected error: {error}"
     );
 
@@ -1336,7 +1386,7 @@ fn loaded_snapshots_revalidate_derivation_rules_and_call_site_locations() {
     zero_line_evidence["evidence_records"][0]["source_location"]["line"] = serde_json::json!(0);
     let error = load(&zero_line_evidence);
     assert!(
-        error.contains("no source line"),
+        error.contains("no location within its evidence artifact"),
         "unexpected error: {error}"
     );
 

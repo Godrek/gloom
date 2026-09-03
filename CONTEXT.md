@@ -60,9 +60,17 @@ _Avoid_: Evidence kind, confidence level
 What an evidence record supports: a call site's target-set resolution, one target claim, or the contributor callable identity of one manifestation. Support keeps resolution evidence, target evidence, and identity evidence from being substituted for one another.
 _Avoid_: Evidence role, edge weight
 
+**Evidence provenance**:
+The acquired input an evidence record was read from and the location within that input's evidence artifact. Provenance belongs to the evidence record itself rather than to the entity it supports, so runtime evidence about a statically observed call site keeps the trace's artifact and line.
+_Avoid_: Source line, evidence origin
+
 **Contributor callable identity**:
 The identity an evidence contributor asserts for a callable within one observation context. It is the contributor's claim of sameness across its own contexts and is distinct from a display name.
 _Avoid_: Symbol name, function name
+
+**Contributor call-site identity**:
+The identity an evidence contributor asserts for a call site within one observation context and acquired input. A later acquired input attaches target claims to an already-published call site by naming this identity together with the acquired input it was published from and the caller's contributor callable identity; matching display names or source lines never join call sites.
+_Avoid_: Call-site key, call ID
 
 **Build-scoped source projection**:
 A source-oriented projection for one real compilation, with source correspondence wherever evidence preserves it. It does not reconstruct language-level meaning that its evidence sources have erased.

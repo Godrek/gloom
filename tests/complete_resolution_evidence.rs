@@ -1,10 +1,11 @@
 use gloom::app::Application;
 use gloom::{
-    CompletenessBasis, ContributedCallKind, ContributedCallSite, ContributedCallable,
-    ContributedEvidence, ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
-    PublishedSnapshot, Resolution,
+    CompletenessBasis, ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
+    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
+    ObservationContext, PublishedSnapshot, Resolution,
 };
 use std::path::{Path, PathBuf};
 
@@ -29,7 +30,13 @@ struct SiteSpec {
 struct DispatchFixture {
     static_site: SiteSpec,
     traced_site: SiteSpec,
+    /// When set, a second acquired input attaches a target claim to the traced
+    /// call site, with this basis on the attached target evidence.
+    attachment_target_basis: Option<Option<CompletenessBasis>>,
 }
+
+const FIXTURE_FINGERPRINT: &str = "fixture:completeness";
+const ATTACHMENT_INPUT: &str = "attachment.fixture";
 
 fn site(resolution: Resolution, basis: Option<CompletenessBasis>) -> SiteSpec {
     SiteSpec {
@@ -51,12 +58,18 @@ fn evidence(
     scope: EvidenceScope,
     support: EvidenceSupport,
     completeness_basis: Option<CompletenessBasis>,
+    evidence_artifact: &str,
+    line: usize,
 ) -> ContributedEvidence {
     ContributedEvidence {
         evidence_type: evidence_type.into(),
         scope,
         support,
         completeness_basis,
+        location: ContributedEvidenceLocation {
+            evidence_artifact: evidence_artifact.into(),
+            line,
+        },
     }
 }
 
@@ -64,6 +77,7 @@ fn callable(
     contributor_callable_id: &str,
     line: usize,
     context: &ObservationContext,
+    evidence_artifact: &str,
 ) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: contributor_callable_id.into(),
@@ -81,6 +95,8 @@ fn callable(
             },
             EvidenceSupport::ContributorIdentity,
             None,
+            evidence_artifact,
+            line,
         ),
     }
 }
@@ -92,6 +108,7 @@ fn call_site(
     evidence_type: &str,
     scope: EvidenceScope,
     context: &ObservationContext,
+    evidence_artifact: &str,
 ) -> ContributedCallSite {
     let target_claims = if spec.resolution == Resolution::Absent {
         Vec::new()
@@ -106,10 +123,13 @@ fn call_site(
                 scope,
                 EvidenceSupport::TargetClaim,
                 spec.target_basis.clone(),
+                evidence_artifact,
+                line,
             )],
         }]
     };
     ContributedCallSite {
+        contributor_call_site_id: ContributorCallSiteId::new(format!("dispatch:{line}")).unwrap(),
         kind: ContributedCallKind::Indirect,
         caller_callable_id: "dispatch".into(),
         line,
@@ -120,6 +140,8 @@ fn call_site(
             scope,
             EvidenceSupport::CallSiteResolution,
             spec.basis.clone(),
+            evidence_artifact,
+            line,
         ),
         target_claims,
     }
@@ -144,20 +166,24 @@ impl EvidenceContributor for DispatchFixture {
         context: &ObservationContext,
     ) -> Result<EvidenceContribution, String> {
         let traced_context = traced_context(context);
+        let artifact = input.display().to_string();
+        if input.ends_with(ATTACHMENT_INPUT) {
+            return Ok(self.attachment_contribution(context, &traced_context, &artifact));
+        }
         Ok(EvidenceContribution {
             input: ContributedInput {
                 path: input.display().to_string(),
-                evidence_artifact: input.display().to_string(),
+                evidence_artifact: artifact.clone(),
                 media_type: "application/x-gloom-fixture".into(),
                 acquisition_method: "semantic-fixture".into(),
                 content_fingerprint: "fixture:completeness".into(),
             },
             observation_contexts: vec![context.clone(), traced_context.clone()],
             callables: vec![
-                callable("dispatch", 10, context),
-                callable("static_target", 11, context),
-                callable("dispatch", 12, &traced_context),
-                callable("traced_target", 13, &traced_context),
+                callable("dispatch", 10, context, &artifact),
+                callable("static_target", 11, context, &artifact),
+                callable("dispatch", 12, &traced_context, &artifact),
+                callable("traced_target", 13, &traced_context, &artifact),
             ],
             call_sites: vec![
                 call_site(
@@ -167,6 +193,7 @@ impl EvidenceContributor for DispatchFixture {
                     "static-indirect-call",
                     EvidenceScope::Static,
                     context,
+                    &artifact,
                 ),
                 call_site(
                     &self.traced_site,
@@ -175,9 +202,62 @@ impl EvidenceContributor for DispatchFixture {
                     "runtime-indirect-call",
                     EvidenceScope::Runtime,
                     &traced_context,
+                    &artifact,
                 ),
             ],
+            call_site_attachments: Vec::new(),
         })
+    }
+}
+
+impl DispatchFixture {
+    /// A later acquired input attaching one target claim to the traced call
+    /// site the first input published. An attachment carries target evidence
+    /// only, so a completeness basis on it is always misplaced.
+    fn attachment_contribution(
+        &self,
+        context: &ObservationContext,
+        traced_context: &ObservationContext,
+        artifact: &str,
+    ) -> EvidenceContribution {
+        let target_basis = self
+            .attachment_target_basis
+            .clone()
+            .expect("the attachment input is only acquired when the fixture declares one");
+        EvidenceContribution {
+            input: ContributedInput {
+                path: artifact.into(),
+                evidence_artifact: artifact.into(),
+                media_type: "application/x-gloom-fixture".into(),
+                acquisition_method: "semantic-fixture".into(),
+                content_fingerprint: "fixture:attachment".into(),
+            },
+            observation_contexts: vec![context.clone(), traced_context.clone()],
+            callables: vec![callable("attached_target", 20, traced_context, artifact)],
+            call_sites: Vec::new(),
+            call_site_attachments: vec![ContributedCallSiteAttachment {
+                call_site: ContributedCallSiteReference {
+                    observation_context_id: traced_context.id.clone(),
+                    acquired_input_fingerprint: FIXTURE_FINGERPRINT.into(),
+                    caller_callable_id: "dispatch".into(),
+                    contributor_call_site_id: ContributorCallSiteId::new("dispatch:2").unwrap(),
+                },
+                target_claims: vec![ContributedTargetClaim {
+                    target_callable_id: "attached_target".into(),
+                    callee_display_name: "attached_target".into(),
+                    target_representation: "fixture-callable".into(),
+                    observation_context_id: traced_context.id.clone(),
+                    evidence: vec![evidence(
+                        "runtime-observed-target",
+                        EvidenceScope::Runtime,
+                        EvidenceSupport::TargetClaim,
+                        target_basis,
+                        artifact,
+                        21,
+                    )],
+                }],
+            }],
+        }
     }
 }
 
@@ -213,6 +293,26 @@ fn publish(static_site: SiteSpec, traced_site: SiteSpec) -> Result<PublishedSnap
         &DispatchFixture {
             static_site,
             traced_site,
+            attachment_target_basis: None,
+        },
+    )
+}
+
+/// Publishes the fixture plus a later acquired input that attaches a target
+/// claim to the traced call site, with `basis` on the attached target evidence.
+fn publish_with_attachment(
+    attached_basis: Option<CompletenessBasis>,
+) -> Result<PublishedSnapshot, String> {
+    Application.publish_snapshot(
+        &[
+            PathBuf::from("completeness.fixture"),
+            PathBuf::from(ATTACHMENT_INPUT),
+        ],
+        fixture_context(),
+        &DispatchFixture {
+            static_site: site(Resolution::Complete, Some(basis())),
+            traced_site: site(Resolution::Partial, None),
+            attachment_target_basis: Some(attached_basis),
         },
     )
 }
@@ -264,13 +364,17 @@ fn complete_site(exported: &serde_json::Value) -> (serde_json::Value, serde_json
 }
 
 /// Copies one evidence record under a new identity that no call-site resolution
-/// references, optionally giving the copy a completeness basis.
+/// references, optionally giving the copy a completeness basis. The copy keeps
+/// the acquired-input prefix of the record it was copied from, so it satisfies
+/// the ownership rules and is rejected for being unreferenced rather than for
+/// naming an input it was not published from.
 fn add_unreferenced_resolution_evidence(
     exported: &mut serde_json::Value,
     evidence_id: &serde_json::Value,
-    new_id: &str,
+    suffix: &str,
     basis: Option<CompletenessBasis>,
-) {
+) -> String {
+    let new_id = format!("{}:{suffix}", evidence_id.as_str().unwrap());
     let mut orphan = exported["evidence_records"]
         .as_array()
         .unwrap()
@@ -289,6 +393,7 @@ fn add_unreferenced_resolution_evidence(
         .as_array_mut()
         .unwrap()
         .push(orphan);
+    new_id
 }
 
 fn set_resolution(exported: &mut serde_json::Value, call_site_id: &serde_json::Value, to: &str) {
@@ -558,16 +663,17 @@ fn an_unreferenced_completeness_basis_cannot_ride_along_with_an_open_resolution(
     ] {
         let exported = export(&snapshot);
         let (_, evidence_id) = resolved_site(&exported, kind);
+        let mut orphan_id = String::new();
         let error = load_error(exported, |exported| {
-            add_unreferenced_resolution_evidence(
+            orphan_id = add_unreferenced_resolution_evidence(
                 exported,
                 &evidence_id,
-                "evidence:orphan-basis",
+                "orphan-basis",
                 Some(basis()),
             );
         });
         assert!(
-            error.contains("evidence:orphan-basis")
+            error.contains(&orphan_id)
                 && error.contains("is not referenced by the resolution of call site"),
             "unexpected error for {kind}: {error}"
         );
@@ -580,12 +686,13 @@ fn unreferenced_call_site_resolution_evidence_is_rejected_even_without_a_basis()
     let exported = export(&snapshot);
     let (_, evidence_id) = resolved_site(&exported, "partial");
 
+    let mut orphan_id = String::new();
     let error = load_error(exported, |exported| {
-        add_unreferenced_resolution_evidence(exported, &evidence_id, "evidence:orphan", None);
+        orphan_id = add_unreferenced_resolution_evidence(exported, &evidence_id, "orphan", None);
     });
 
     assert!(
-        error.contains("evidence:orphan")
+        error.contains(&orphan_id)
             && error.contains("is not referenced by the resolution of call site"),
         "unexpected error: {error}"
     );
@@ -657,4 +764,39 @@ fn contributor_identity_evidence_is_exempt_from_the_resolution_rules() {
             serde_json::to_value(basis()).unwrap();
     });
     assert!(error.contains(MISPLACED_BASIS), "unexpected error: {error}");
+}
+
+/// A later acquired input can only attach target claims, so it can never
+/// declare a call site complete: a basis on attached target evidence is
+/// rejected, and an attachment leaves the site's resolution as published.
+#[test]
+fn an_attached_target_claim_may_not_carry_a_completeness_basis() {
+    let error = publish_with_attachment(Some(basis())).unwrap_err();
+    assert!(error.contains(MISPLACED_BASIS), "unexpected error: {error}");
+
+    let snapshot = publish_with_attachment(None).unwrap();
+    let traced_context_id = traced_context(&fixture_context()).id;
+    let traced = snapshot
+        .call_site_resolutions()
+        .iter()
+        .find(|resolution| resolution.observation_context_id == traced_context_id)
+        .unwrap();
+
+    assert_eq!(traced.resolution, Resolution::Partial);
+    assert_eq!(
+        snapshot
+            .target_claims()
+            .iter()
+            .filter(|claim| claim.call_site_id == traced.call_site_id)
+            .count(),
+        2,
+        "the attachment must add a target claim to the published call site"
+    );
+    assert!(
+        snapshot
+            .evidence_records()
+            .iter()
+            .filter(|evidence| evidence.support != EvidenceSupport::CallSiteResolution)
+            .all(|evidence| evidence.completeness_basis.is_none())
+    );
 }
