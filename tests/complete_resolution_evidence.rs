@@ -3,8 +3,8 @@ use gloom::{
     CompletenessBasis, ContributedCallKind, ContributedCallSite, ContributedCallable,
     ContributedEvidence, ContributedInput, ContributedTargetClaim, ContributorIdentity,
     EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, ObservationContext, PublishedSnapshot,
-    Resolution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    PublishedSnapshot, Resolution,
 };
 use std::path::{Path, PathBuf};
 
@@ -226,19 +226,54 @@ fn load_error(
         .unwrap_err()
 }
 
-/// The identity of the complete call site and of the resolution evidence that
-/// carries its completeness basis.
-fn complete_site(exported: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+/// The identity of the call site resolved this way and of its first resolution
+/// evidence record.
+fn resolved_site(
+    exported: &serde_json::Value,
+    kind: &str,
+) -> (serde_json::Value, serde_json::Value) {
     let resolution = exported["call_site_resolutions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|resolution| resolution["resolution"] == serde_json::json!("complete"))
+        .find(|resolution| resolution["resolution"] == serde_json::json!(kind))
         .unwrap();
     (
         resolution["call_site_id"].clone(),
         resolution["evidence_ids"][0].clone(),
     )
+}
+
+fn complete_site(exported: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    resolved_site(exported, "complete")
+}
+
+/// Copies one evidence record under a new identity that no call-site resolution
+/// references, optionally giving the copy a completeness basis.
+fn add_unreferenced_resolution_evidence(
+    exported: &mut serde_json::Value,
+    evidence_id: &serde_json::Value,
+    new_id: &str,
+    basis: Option<CompletenessBasis>,
+) {
+    let mut orphan = exported["evidence_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|evidence| evidence["id"] == *evidence_id)
+        .unwrap()
+        .clone();
+    orphan["id"] = serde_json::json!(new_id);
+    match basis {
+        Some(basis) => orphan["completeness_basis"] = serde_json::to_value(basis).unwrap(),
+        None => {
+            orphan.as_object_mut().unwrap().remove("completeness_basis");
+        }
+    }
+    exported["evidence_records"]
+        .as_array_mut()
+        .unwrap()
+        .push(orphan);
 }
 
 fn set_resolution(exported: &mut serde_json::Value, call_site_id: &serde_json::Value, to: &str) {
@@ -483,5 +518,96 @@ fn exported_snapshots_round_trip_the_completeness_basis() {
     assert_eq!(
         reloaded.call_site_resolutions(),
         snapshot.call_site_resolutions()
+    );
+}
+
+#[test]
+fn an_unreferenced_completeness_basis_cannot_ride_along_with_an_open_resolution() {
+    for (kind, snapshot) in [
+        (
+            "absent",
+            publish(
+                site(Resolution::Absent, None),
+                site(Resolution::Partial, None),
+            )
+            .unwrap(),
+        ),
+        (
+            "partial",
+            publish(
+                site(Resolution::Partial, None),
+                site(Resolution::Partial, None),
+            )
+            .unwrap(),
+        ),
+    ] {
+        let exported = export(&snapshot);
+        let (_, evidence_id) = resolved_site(&exported, kind);
+        let error = load_error(exported, |exported| {
+            add_unreferenced_resolution_evidence(
+                exported,
+                &evidence_id,
+                "evidence:orphan-basis",
+                Some(basis()),
+            );
+        });
+        assert!(
+            error.contains("evidence:orphan-basis")
+                && error.contains("is not referenced by the resolution of call site"),
+            "unexpected error for {kind}: {error}"
+        );
+    }
+}
+
+#[test]
+fn unreferenced_call_site_resolution_evidence_is_rejected_even_without_a_basis() {
+    let snapshot = published_fixture();
+    let exported = export(&snapshot);
+    let (_, evidence_id) = resolved_site(&exported, "partial");
+
+    let error = load_error(exported, |exported| {
+        add_unreferenced_resolution_evidence(exported, &evidence_id, "evidence:orphan", None);
+    });
+
+    assert!(
+        error.contains("evidence:orphan")
+            && error.contains("is not referenced by the resolution of call site"),
+        "unexpected error: {error}"
+    );
+}
+
+/// A call whose callee operand is a data global is not a call to a callable of
+/// that name, so it must stay unresolved and must not declare completeness.
+#[test]
+#[ignore = "requires #22 (declared-callable resolution) on main"]
+fn a_call_through_a_data_global_declares_no_completeness() {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        "snapshot:global-pointer-call",
+        "global-pointer-call",
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from("tests/fixtures/global-pointer-call.ll")],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+
+    let projected = &snapshot.call_graph_projection().call_sites;
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].resolution, Resolution::Absent);
+    assert!(projected[0].targets.is_empty());
+    assert!(snapshot.target_claims().is_empty());
+    assert!(
+        snapshot
+            .evidence_records()
+            .iter()
+            .all(|evidence| evidence.completeness_basis.is_none())
     );
 }

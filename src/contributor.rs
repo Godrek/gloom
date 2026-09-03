@@ -1,7 +1,6 @@
 use crate::snapshot::{
     CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId,
-    Resolution, contradictory_completeness_basis_error, misplaced_completeness_basis_error,
-    missing_completeness_basis_error,
+    Resolution, check_completeness_declaration, misplaced_completeness_basis_error,
 };
 use std::path::Path;
 
@@ -14,10 +13,11 @@ use std::path::Path;
 ///   callable identity per manifestation, and contribute first-class call sites
 ///   with per-site target-set resolution, typed evidence (scope and support),
 ///   and zero or more target claims. Indirect-call evidence became a declared
-///   capability. Call-site-resolution evidence may carry a completeness basis,
-///   and complete resolution requires one; the seam is pre-stable, so this
-///   tightening of contract 2 is not a separate version.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "2";
+///   capability.
+/// - `3`: call-site-resolution evidence may carry a completeness basis, and a
+///   complete target-set resolution requires one, so a contributor declares the
+///   boundary it closed over instead of asserting completeness on its own.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "3";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {
@@ -267,20 +267,11 @@ impl EvidenceContribution {
                     call_site.resolution,
                 ));
             }
-            match (
+            check_completeness_declaration(
                 call_site.resolution,
                 call_site.evidence.completeness_basis.is_some(),
-            ) {
-                (Resolution::Complete, false) => {
-                    return Err(missing_completeness_basis_error("contributed call site"));
-                }
-                (Resolution::Partial | Resolution::Absent, true) => {
-                    return Err(contradictory_completeness_basis_error(
-                        "contributed call site",
-                    ));
-                }
-                _ => {}
-            }
+                "contributed call site",
+            )?;
             if call_site.kind == ContributedCallKind::Direct
                 && (call_site.resolution != Resolution::Complete || contextual_target_count != 1)
             {

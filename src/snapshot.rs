@@ -292,9 +292,9 @@ impl Resolution {
     }
 }
 
-/// A contributor's explicit declaration that it observed a closed world at one
-/// call site: `boundary` names the scope it observed, and `guarantee` states why
-/// no other target can exist within that boundary. Completeness is declared
+/// A contributor's explicit declaration that it observed a closed target set at
+/// one call site: `boundary` names the scope it observed, and `guarantee` states
+/// why no other target can exist within that boundary. Completeness is declared
 /// rather than inferred, so it stays independent of how the evidence was
 /// obtained.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -314,10 +314,24 @@ impl CompletenessBasis {
     }
 }
 
-/// Shared wording for the policy both the contributor seam and snapshot loading
-/// enforce, so a rejected contribution and a rejected export explain the same
-/// requirement.
-pub(crate) fn missing_completeness_basis_error(subject: &str) -> String {
+/// The one completeness rule, applied by both the contributor seam and snapshot
+/// loading so they cannot drift: Complete resolution rests on a declared
+/// completeness basis, and only Complete resolution may.
+pub(crate) fn check_completeness_declaration(
+    resolution: Resolution,
+    declared_basis: bool,
+    subject: &str,
+) -> Result<(), String> {
+    match (resolution, declared_basis) {
+        (Resolution::Complete, false) => Err(missing_completeness_basis_error(subject)),
+        (Resolution::Partial | Resolution::Absent, true) => {
+            Err(contradictory_completeness_basis_error(subject))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn missing_completeness_basis_error(subject: &str) -> String {
     format!(
         "{subject} declares Complete resolution without a completeness basis; Complete \
          resolution requires at least one call-site-resolution evidence record carrying a \
@@ -326,7 +340,7 @@ pub(crate) fn missing_completeness_basis_error(subject: &str) -> String {
     )
 }
 
-pub(crate) fn contradictory_completeness_basis_error(subject: &str) -> String {
+fn contradictory_completeness_basis_error(subject: &str) -> String {
     format!(
         "{subject} carries a completeness basis without declaring Complete resolution; a \
          completeness basis asserts a closed target set and contradicts Partial or Absent \
@@ -1094,6 +1108,7 @@ impl PublishedSnapshot {
                 ));
             }
         }
+        let mut referenced_resolution_evidence: BTreeMap<&str, usize> = BTreeMap::new();
         for resolution in &self.call_site_resolutions {
             let call_site = entities_by_id
                 .get(resolution.call_site_id.as_str())
@@ -1143,6 +1158,9 @@ impl PublishedSnapshot {
             let mut resolution_evidence_ids = BTreeSet::new();
             let mut declared_completeness = false;
             for evidence_id in &resolution.evidence_ids {
+                *referenced_resolution_evidence
+                    .entry(evidence_id.as_str())
+                    .or_insert(0) += 1;
                 if !resolution_evidence_ids.insert(evidence_id.as_str()) {
                     return Err(format!(
                         "resolution for '{}' references evidence '{evidence_id}' more than once",
@@ -1169,15 +1187,35 @@ impl PublishedSnapshot {
                 }
                 declared_completeness |= evidence.completeness_basis.is_some();
             }
-            let subject = format!("resolution for '{}'", resolution.call_site_id);
-            match (resolution.resolution, declared_completeness) {
-                (Resolution::Complete, false) => {
-                    return Err(missing_completeness_basis_error(&subject));
+            check_completeness_declaration(
+                resolution.resolution,
+                declared_completeness,
+                &format!("resolution for '{}'", resolution.call_site_id),
+            )?;
+        }
+        for evidence in self
+            .evidence_records
+            .iter()
+            .filter(|evidence| evidence.support == EvidenceSupport::CallSiteResolution)
+        {
+            match referenced_resolution_evidence
+                .get(evidence.id.as_str())
+                .copied()
+                .unwrap_or_default()
+            {
+                1 => {}
+                0 => {
+                    return Err(format!(
+                        "call-site-resolution evidence '{}' is not referenced by the resolution of call site '{}'",
+                        evidence.id, evidence.subject_entity_id
+                    ));
                 }
-                (Resolution::Partial | Resolution::Absent, true) => {
-                    return Err(contradictory_completeness_basis_error(&subject));
+                _ => {
+                    return Err(format!(
+                        "call-site-resolution evidence '{}' is referenced by more than one call-site resolution",
+                        evidence.id
+                    ));
                 }
-                _ => {}
             }
         }
         let claim_ids: BTreeSet<_> = self
