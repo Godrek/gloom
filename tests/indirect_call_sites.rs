@@ -1841,3 +1841,38 @@ fn wrapped_callee_operands_resolve_to_the_function_they_wrap() {
         BTreeSet::from(["llvm-function"])
     );
 }
+
+/// A pointer type may name the address space it points into, so an alias
+/// written `alias void (), ptr addrspace(1) @target` still names its aliasee:
+/// the `addrspace` clause belongs to the aliasee's type, not to the operand
+/// that follows it.
+#[test]
+fn address_space_qualified_aliasee_types_do_not_hide_the_aliasee() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "address-space-alias-fixture",
+        "tests/fixtures/address-space-alias.ll",
+        "address_space_caller",
+    );
+
+    assert_eq!(resolutions(&result), [Resolution::Complete; 4]);
+    assert_eq!(
+        result
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["opaque_space", "typed_space", "no_space", "space_target"]
+    );
+    assert_eq!(lines, [17, 18, 19, 20]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from([
+            "address_space_caller",
+            "no_space",
+            "opaque_space",
+            "plain_target",
+            "space_target",
+            "typed_space",
+        ])
+    );
+}

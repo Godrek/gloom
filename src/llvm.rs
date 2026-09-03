@@ -822,6 +822,10 @@ fn alias_aliasee(tokens: &[LlvmToken], keyword: usize) -> CalleeOperand {
 /// braced struct type, or a function type with its parenthesised parameter
 /// list. Pointer stars carry no token, so `void ()*` ends with its parameter
 /// list and `ptr` with itself.
+///
+/// A pointer type may name the address space it points into, as
+/// `ptr addrspace(1)` or `void () addrspace(1)*`, so an `addrspace` clause
+/// belongs to the type it follows rather than to the operand after it.
 fn type_end(tokens: &[LlvmToken], index: usize, end: usize) -> Option<usize> {
     if index >= end {
         return None;
@@ -831,8 +835,16 @@ fn type_end(tokens: &[LlvmToken], index: usize, end: usize) -> Option<usize> {
         LlvmTokenKind::LeftBrace => matching_right_brace(tokens, index)? + 1,
         _ => return None,
     };
-    while next < end && tokens[next].kind == LlvmTokenKind::LeftParenthesis {
-        next = matching_right_parenthesis(tokens, next)? + 1;
+    while next < end {
+        let clause = match &tokens[next].kind {
+            LlvmTokenKind::LeftParenthesis => next,
+            LlvmTokenKind::Word(word) if word == "addrspace" => next + 1,
+            _ => break,
+        };
+        if tokens.get(clause).map(|token| &token.kind) != Some(&LlvmTokenKind::LeftParenthesis) {
+            break;
+        }
+        next = matching_right_parenthesis(tokens, clause)? + 1;
     }
     Some(next)
 }
