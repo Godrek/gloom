@@ -137,7 +137,7 @@ The explicit process by which Gloom obtains build evidence, either by ingesting 
 _Avoid_: Build discovery, automatic build
 
 **Published snapshot**:
-An immutable program snapshot made available for queries after its required evidence and indexes are coherent. In-progress indexing does not mutate a published snapshot.
+An immutable program snapshot made available for queries after its required evidence and indexes are coherent. Coherence belongs to the snapshot itself rather than to the act of loading one: reading a published snapshot back from an export validates it, so an incoherent document never becomes one. In-progress indexing does not mutate a published snapshot.
 _Avoid_: Current graph, live graph
 
 **Named query**:
