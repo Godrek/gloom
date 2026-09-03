@@ -7,10 +7,11 @@ mod snapshot;
 mod viewer;
 
 pub use contributor::{
-    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedInput, ContributedTargetClaim, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor,
+    ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
+    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
+    ContributedEvidenceLocation, ContributedInput, ContributedResolutionRevision,
+    ContributedTargetClaim, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
+    EvidenceCapability, EvidenceContribution, EvidenceContributor,
 };
 pub use llvm::LlvmTextContributor;
 pub use model::{AnalysisSummary, Document, Edge, Metadata, Node};
