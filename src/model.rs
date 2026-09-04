@@ -23,11 +23,21 @@ fn unknown_language() -> String {
 }
 
 impl Node {
-    pub fn function(id: impl Into<String>, defined: bool, source: Option<String>) -> Self {
-        let id = id.into();
+    /// A callable node.
+    ///
+    /// The identity and the label are separate arguments because a display
+    /// name is a label: two translation-unit-local callables may share one
+    /// while remaining different callables, so only the identity may key the
+    /// graph.
+    pub fn callable(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        defined: bool,
+        source: Option<String>,
+    ) -> Self {
         Self {
-            label: id.clone(),
-            id,
+            id: id.into(),
+            label: label.into(),
             kind: function_kind(),
             defined,
             language: "llvm".into(),
@@ -173,8 +183,8 @@ mod tests {
     #[test]
     fn definition_wins_and_document_round_trips() {
         let mut graph = Graph::default();
-        graph.add_node(Node::function("f", false, None));
-        graph.add_node(Node::function("f", true, Some("f.c".into())));
+        graph.add_node(Node::callable("f", "f", false, None));
+        graph.add_node(Node::callable("f", "f", true, Some("f.c".into())));
         assert!(graph.nodes["f"].defined);
 
         let document = Document::from_graph(&graph, analysis::summary(&graph));

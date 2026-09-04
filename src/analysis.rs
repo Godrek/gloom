@@ -101,6 +101,34 @@ pub fn entry_points(graph: &Graph) -> Vec<String> {
         .collect()
 }
 
+/// Resolves a selector a user typed to one node identity.
+///
+/// A display name is a label, so several nodes may carry it: a callable
+/// private to its translation unit keeps an identity of its own in every unit
+/// that declares one. A selector that names an identity exactly selects that
+/// node; otherwise it is matched against labels, and an ambiguous label is
+/// reported with the identities to choose from rather than resolved by picking
+/// one of them.
+pub fn resolve(graph: &Graph, selector: &str) -> Result<String, String> {
+    if graph.nodes.contains_key(selector) {
+        return Ok(selector.to_owned());
+    }
+    let matched = graph
+        .nodes
+        .values()
+        .filter(|node| node.label == selector)
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    match matched.as_slice() {
+        [] => Err(format!("unknown function '{selector}'")),
+        [id] => Ok((*id).to_owned()),
+        several => Err(format!(
+            "function '{selector}' is ambiguous; select one of: {}",
+            several.join(", ")
+        )),
+    }
+}
+
 pub fn reachable(graph: &Graph, start: &str) -> Result<Vec<String>, String> {
     if !graph.nodes.contains_key(start) {
         return Err(format!("unknown function '{start}'"));
@@ -163,7 +191,7 @@ mod tests {
     fn sample() -> Graph {
         let mut graph = Graph::default();
         for name in ["main", "a", "b", "leaf"] {
-            graph.add_node(Node::function(name, true, None));
+            graph.add_node(Node::callable(name, name, true, None));
         }
         for (source, target) in [("main", "a"), ("a", "b"), ("b", "a"), ("b", "leaf")] {
             graph.add_edge(source, target, "direct-call");

@@ -150,11 +150,20 @@ impl Application {
             Query::PotentialRecursiveCycles => {
                 QueryResult::PotentialRecursiveCycles(analysis::cycles(&graph))
             }
-            Query::Reachable { start } => {
-                QueryResult::Reachable(analysis::reachable(&graph, &start)?)
-            }
+            // A starting point is selected by identity. A user may type a
+            // display name, which is a label several callables can share, so it
+            // is resolved to one identity first and an ambiguous label is
+            // reported rather than resolved by picking a callable.
+            Query::Reachable { start } => QueryResult::Reachable(analysis::reachable(
+                &graph,
+                &analysis::resolve(&graph, &start)?,
+            )?),
             Query::ShortestPath { start, end } => {
-                QueryResult::ShortestPath(analysis::shortest_path(&graph, &start, &end)?)
+                QueryResult::ShortestPath(analysis::shortest_path(
+                    &graph,
+                    &analysis::resolve(&graph, &start)?,
+                    &analysis::resolve(&graph, &end)?,
+                )?)
             }
         })
     }

@@ -1198,6 +1198,24 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     Ok(observations)
 }
 
+/// The identity a callable has in the prototype graph.
+///
+/// A callable the link can see is one node across the inputs a build merges,
+/// which is what the link does with it. One that is private to its translation
+/// unit is a node of its own in every unit that declares one, so two
+/// identically named local callables never merge and no path can cross between
+/// them. The label stays the display name either way.
+fn graph_node_id(
+    name: &str,
+    identity_scope: CallableIdentityScope,
+    source: Option<&str>,
+) -> String {
+    match (identity_scope, source) {
+        (CallableIdentityScope::AcquiredInput, Some(source)) => format!("{name}@{source}"),
+        _ => name.to_owned(),
+    }
+}
+
 pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> {
     let observations = observe_llvm_ir(text)?;
     let mut graph = Graph::default();
@@ -1205,17 +1223,20 @@ pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> 
         graph.inputs.push(source.into());
     }
     for callable in observations.callables {
-        graph.add_node(Node::function(
+        graph.add_node(Node::callable(
+            graph_node_id(&callable.name, callable.identity_scope, source),
             callable.name,
             callable.defined,
             source.map(str::to_owned),
         ));
     }
     for call in observations.calls {
+        let caller = graph_node_id(&call.caller, call.caller_identity_scope, source);
         match call.target {
             ObservedCallTarget::Direct(callee) => {
-                graph.add_node(Node::function(&callee.name, false, None));
-                graph.add_edge(&call.caller, &callee.name, "direct-call");
+                let callee_id = graph_node_id(&callee.name, callee.identity_scope, source);
+                graph.add_node(Node::callable(&callee_id, &callee.name, false, None));
+                graph.add_edge(&caller, &callee_id, "direct-call");
             }
             ObservedCallTarget::Indirect => {
                 graph.add_node(Node {
@@ -1226,7 +1247,7 @@ pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> 
                     language: "llvm".into(),
                     source: None,
                 });
-                graph.add_edge(&call.caller, "<indirect>", "indirect-call");
+                graph.add_edge(&caller, "<indirect>", "indirect-call");
             }
         }
     }
