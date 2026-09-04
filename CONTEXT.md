@@ -72,6 +72,10 @@ _Avoid_: Known function, resolved callee
 The identity an evidence contributor asserts for a callable within one observation context. It is the contributor's claim of sameness across its own contexts and is distinct from a display name.
 _Avoid_: Symbol name, function name
 
+**Callable identity scope**:
+The boundary within which one contributor callable identity means one callable: the acquired input it was read from, or the linkage namespace that joins acquired inputs. A callable that is not visible beyond one acquired input is a different callable in another, however the two are spelled.
+_Avoid_: Visibility, linkage flag
+
 **Contributor call-site identity**:
 The identity an evidence contributor asserts for a call site within one observation context and acquired input. A later acquired input attaches target claims to an already-published call site by naming this identity together with the acquired input it was published from and the caller's contributor callable identity; matching display names or source lines never join call sites.
 _Avoid_: Call-site key, call ID

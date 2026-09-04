@@ -23,6 +23,6 @@ pub use snapshot::{
     EvidenceRecord, EvidenceScope, EvidenceSupport, Explanation, ExplanationHandle, Manifestation,
     ManifestationId, NamedQueryResult, ObservationContext, ObservationContextId, ProgramEntity,
     ProgramEntityId, ProgramEntityKind, ProgramSnapshot, ProgramSnapshotId, ProjectedCallSite,
-    ProjectedCallTarget, PublishedSnapshot, Resolution, SNAPSHOT_SCHEMA_VERSION, SourceLocation,
-    TargetClaim, TargetClaimId,
+    ProjectedCallTarget, PublishedSnapshot, Resolution, SNAPSHOT_SCHEMA_VERSION, SearchedCallable,
+    SearchedCallableManifestation, SourceLocation, TargetClaim, TargetClaimId,
 };
