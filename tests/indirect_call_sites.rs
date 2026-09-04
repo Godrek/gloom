@@ -1,11 +1,12 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CompletenessBasis,
-    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    NamedQueryResult, ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
+    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
+    CallableIdentityScope, CompletenessBasis, ContributedCallKind, ContributedCallSite,
+    ContributedCallable, ContributedEvidence, ContributedEvidenceLocation, ContributedInput,
+    ContributedTargetClaim, ContributorCallSiteId, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, NamedQueryResult,
+    ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -98,6 +99,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 .enumerate()
                 .map(|(index, name)| ContributedCallable {
                     contributor_callable_id: name.into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
@@ -113,6 +115,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 })
                 .chain([ContributedCallable {
                     contributor_callable_id: "first_target".into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: "first_target".into(),
                     defined: true,
                     representation: "runtime-fixture-callable".into(),
@@ -144,6 +147,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 target_claims: vec![
                     ContributedTargetClaim {
                         target_callable_id: "first_target".into(),
+                        target_identity_scope: CallableIdentityScope::LinkedProgram,
                         callee_display_name: "first_target".into(),
                         target_representation: "fixture-callable".into(),
                         observation_context_id: context.id.clone(),
@@ -157,6 +161,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                     },
                     ContributedTargetClaim {
                         target_callable_id: "first_target".into(),
+                        target_identity_scope: CallableIdentityScope::LinkedProgram,
                         callee_display_name: "first_target".into(),
                         target_representation: "runtime-fixture-callable".into(),
                         observation_context_id: runtime_context.id.clone(),
@@ -170,6 +175,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                     },
                     ContributedTargetClaim {
                         target_callable_id: "second_target".into(),
+                        target_identity_scope: CallableIdentityScope::LinkedProgram,
                         callee_display_name: "second_target".into(),
                         target_representation: "fixture-callable".into(),
                         observation_context_id: context.id.clone(),
@@ -231,6 +237,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
             callables: vec![
                 ContributedCallable {
                     contributor_callable_id: "static-worker-a".into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: "worker".into(),
                     defined: true,
                     representation: "static-worker-a".into(),
@@ -246,6 +253,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                 },
                 ContributedCallable {
                     contributor_callable_id: "static-worker-b".into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: "worker".into(),
                     defined: true,
                     representation: "static-worker-b".into(),
@@ -261,6 +269,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                 },
                 ContributedCallable {
                     contributor_callable_id: "runtime-worker".into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: "worker".into(),
                     defined: true,
                     representation: "runtime-worker".into(),
@@ -368,6 +377,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                 .enumerate()
                 .map(|(index, name)| ContributedCallable {
                     contributor_callable_id: name.into(),
+                    identity_scope: CallableIdentityScope::LinkedProgram,
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
@@ -401,6 +411,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                 },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "runtime_target".into(),
+                    target_identity_scope: CallableIdentityScope::LinkedProgram,
                     callee_display_name: "runtime_target".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),

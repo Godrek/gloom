@@ -1,6 +1,7 @@
 use crate::snapshot::{
-    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId,
-    Resolution, check_completeness_declaration, misplaced_completeness_basis_error,
+    CallableIdentityScope, CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext,
+    ObservationContextId, Resolution, check_completeness_declaration,
+    misplaced_completeness_basis_error,
 };
 use std::fmt;
 use std::path::Path;
@@ -38,7 +39,14 @@ use std::path::Path;
 ///   [`DECLARED_CALLABLE_REPRESENTATIONS`]. A contributor that
 ///   reaches a callable only through a target claim, as an external `declare`
 ///   or an alias once did, must contribute it as a callable instead.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "6";
+/// - `7`: every contributed callable and every target claim declares the
+///   [`CallableIdentityScope`] its contributor callable identity means one
+///   callable within. A contributor that reads a callable which is not visible
+///   beyond the acquired input it was read from must scope its identity to
+///   that input, so that an identically spelled callable in another input can
+///   never carry the same identity. Display names remain labels and never
+///   serve as identities.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "7";
 
 /// The target-evidence type that says a call instruction names its callee
 /// outright, rather than that the callee was observed among a call site's
@@ -115,6 +123,11 @@ pub struct ContributedInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallable {
     pub contributor_callable_id: String,
+    /// The boundary within which `contributor_callable_id` means one callable.
+    /// A callable visible only inside this acquired input must be scoped to it,
+    /// so that the core can hold two identically named local callables apart
+    /// without ever reading the identity itself.
+    pub identity_scope: CallableIdentityScope,
     pub display_name: String,
     pub defined: bool,
     pub representation: String,
@@ -232,6 +245,10 @@ pub struct ContributedCallSiteAttachment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedTargetClaim {
     pub target_callable_id: String,
+    /// The boundary within which `target_callable_id` means one callable, on
+    /// the same terms as [`ContributedCallable::identity_scope`]. It must agree
+    /// with the scope the contribution declared for that identity.
+    pub target_identity_scope: CallableIdentityScope,
     pub callee_display_name: String,
     pub target_representation: String,
     pub observation_context_id: ObservationContextId,
@@ -623,6 +640,7 @@ mod tests {
             observation_contexts: vec![context.clone()],
             callables: vec![ContributedCallable {
                 contributor_callable_id: "caller".into(),
+                identity_scope: CallableIdentityScope::LinkedProgram,
                 display_name: "caller".into(),
                 defined: true,
                 representation: "fixture-callable".into(),
@@ -661,6 +679,7 @@ mod tests {
                 },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "callee".into(),
+                    target_identity_scope: CallableIdentityScope::LinkedProgram,
                     callee_display_name: "callee".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),

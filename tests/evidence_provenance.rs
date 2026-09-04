@@ -1,6 +1,6 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
+    CallableIdentityScope, ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
     ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
     ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
     ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
@@ -88,6 +88,7 @@ fn callable(
 ) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: name.into(),
+        identity_scope: CallableIdentityScope::LinkedProgram,
         display_name: name.into(),
         defined: true,
         representation: representation.into(),
@@ -113,6 +114,7 @@ fn target_claim(
 ) -> ContributedTargetClaim {
     ContributedTargetClaim {
         target_callable_id: name.into(),
+        target_identity_scope: CallableIdentityScope::LinkedProgram,
         callee_display_name: name.into(),
         target_representation: representation.into(),
         observation_context_id: observation_context_id.clone(),
@@ -899,7 +901,7 @@ fn call_site_references_select_one_of_two_llvm_inputs_sharing_a_call_site_identi
                 PathBuf::from(TRACE_INPUT),
             ],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller"),
         )
         .unwrap();
 
@@ -969,7 +971,7 @@ fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_reje
         .publish_snapshot(
             &[PathBuf::from(SECOND_LLVM_INPUT), PathBuf::from(TRACE_INPUT)],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller")
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller")
                 .with_unknown_acquired_input(),
         )
         .unwrap_err();
@@ -990,7 +992,7 @@ fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_reje
                 PathBuf::from(TRACE_INPUT),
             ],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller"),
         )
         .unwrap_err();
     assert!(

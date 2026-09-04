@@ -1,8 +1,8 @@
 use gloom::app::Application;
 use gloom::{
-    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, ContributedCallKind, ContributedCallSite,
-    ContributedCallable, ContributedEvidence, ContributedEvidenceLocation, ContributedInput,
-    ContributedTargetClaim, ContributorCallSiteId, ContributorIdentity,
+    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CallableIdentityScope, ContributedCallKind,
+    ContributedCallSite, ContributedCallable, ContributedEvidence, ContributedEvidenceLocation,
+    ContributedInput, ContributedTargetClaim, ContributorCallSiteId, ContributorIdentity,
     EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
     EvidenceContributor, EvidenceScope, EvidenceSupport, Manifestation, ObservationContext,
     ProgramEntityKind, PublishedSnapshot, Resolution,
@@ -96,6 +96,7 @@ fn observed_contexts(publication: &ObservationContext) -> Vec<ObservedContext> {
 fn shared_target(observed: &ObservedContext, line: usize, artifact: &str) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: "shared_target".into(),
+        identity_scope: CallableIdentityScope::LinkedProgram,
         display_name: "shared_target".into(),
         defined: true,
         representation: observed.representation.into(),
@@ -118,6 +119,7 @@ fn fixture_input(input: &Path, fingerprint: &str) -> ContributedInput {
 fn dispatch(observed: &ObservedContext, artifact: &str) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: "dispatch".into(),
+        identity_scope: CallableIdentityScope::LinkedProgram,
         display_name: "dispatch".into(),
         defined: true,
         representation: observed.representation.into(),
@@ -190,6 +192,7 @@ impl EvidenceContributor for SharedTargetFixture {
                     .iter()
                     .map(|observed| ContributedTargetClaim {
                         target_callable_id: "shared_target".into(),
+                        target_identity_scope: CallableIdentityScope::LinkedProgram,
                         callee_display_name: "shared_target".into(),
                         target_representation: observed.representation.into(),
                         observation_context_id: observed.context.id.clone(),

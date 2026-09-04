@@ -1,11 +1,11 @@
 use gloom::app::Application;
 use gloom::{
-    CompletenessBasis, ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
-    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, PublishedSnapshot, Resolution,
+    CallableIdentityScope, CompletenessBasis, ContributedCallKind, ContributedCallSite,
+    ContributedCallSiteAttachment, ContributedCallSiteReference, ContributedCallable,
+    ContributedEvidence, ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim,
+    ContributorCallSiteId, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
+    EvidenceCapability, EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport,
+    LlvmTextContributor, ObservationContext, PublishedSnapshot, Resolution,
 };
 use std::path::{Path, PathBuf};
 
@@ -81,6 +81,7 @@ fn callable(
 ) -> ContributedCallable {
     ContributedCallable {
         contributor_callable_id: contributor_callable_id.into(),
+        identity_scope: CallableIdentityScope::LinkedProgram,
         display_name: contributor_callable_id.into(),
         defined: true,
         representation: "fixture-callable".into(),
@@ -115,6 +116,7 @@ fn call_site(
     } else {
         vec![ContributedTargetClaim {
             target_callable_id: target_callable_id.into(),
+            target_identity_scope: CallableIdentityScope::LinkedProgram,
             callee_display_name: target_callable_id.into(),
             target_representation: "fixture-callable".into(),
             observation_context_id: context.id.clone(),
@@ -244,6 +246,7 @@ impl DispatchFixture {
                 },
                 target_claims: vec![ContributedTargetClaim {
                     target_callable_id: "attached_target".into(),
+                    target_identity_scope: CallableIdentityScope::LinkedProgram,
                     callee_display_name: "attached_target".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: traced_context.id.clone(),

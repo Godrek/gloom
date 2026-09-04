@@ -8,7 +8,8 @@ use crate::contributor::{
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{
-    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, Resolution,
+    CallableIdentityScope, CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext,
+    Resolution,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -38,6 +39,65 @@ struct ObservedCallable {
     pub defined: bool,
     pub line: usize,
     pub representation: &'static str,
+    pub identity_scope: CallableIdentityScope,
+}
+
+/// LLVM's local linkage types.
+///
+/// Per the LangRef a `private` or `internal` global is visible only inside its
+/// own module: `private` is not even emitted into the symbol table, and
+/// `internal` becomes a local symbol the linker never joins. So two modules may
+/// each write one under the same name and they remain two callables. Every
+/// other function linkage — `external`, `weak`, `linkonce`,
+/// `available_externally`, their `_odr` forms, and `extern_weak` — leaves the
+/// symbol visible to the link.
+fn is_local_linkage(word: &str) -> bool {
+    matches!(word, "private" | "internal")
+}
+
+/// The scope a module-scope definition's linkage keywords put it in.
+///
+/// The keywords sit between the introducer (`define`, `declare`, or the `=` of
+/// an alias or ifunc) and the name or keyword that ends the prefix, so only
+/// that span is read: `internal` is neither a type name nor a parameter
+/// attribute, and nothing else in the prefix spells it.
+fn declared_identity_scope(
+    tokens: &[LlvmToken],
+    start: usize,
+    end: usize,
+) -> CallableIdentityScope {
+    if tokens[start..end]
+        .iter()
+        .any(|token| matches!(&token.kind, LlvmTokenKind::Word(word) if is_local_linkage(word)))
+    {
+        CallableIdentityScope::AcquiredInput
+    } else {
+        CallableIdentityScope::LinkedProgram
+    }
+}
+
+/// The identity this contributor asserts for a callable.
+///
+/// A display name is a label, so it never serves as the identity on its own. A
+/// callable the link can see is identified by the symbol the link joins it by,
+/// so the same identity in two acquired inputs names one callable. A callable
+/// private to its module is identified within the acquired input it was read
+/// from, named by the content fingerprint this contribution declares for that
+/// input, so an identically spelled local callable in another input is a
+/// different identity. Two acquisitions of the same module text share a
+/// fingerprint and are, as #23 established for call-site identities, genuinely
+/// indistinguishable to this contributor.
+fn contributor_callable_id(
+    name: &str,
+    identity_scope: CallableIdentityScope,
+    content_fingerprint: &str,
+) -> String {
+    match identity_scope {
+        CallableIdentityScope::LinkedProgram => format!("llvm-symbol:{name}"),
+        CallableIdentityScope::AcquiredInput => {
+            format!("llvm-module-local:{content_fingerprint}:{name}")
+        }
+    }
 }
 
 /// How a callable global is written in the module, kept as the representation
@@ -54,6 +114,7 @@ const LLVM_IFUNC: &str = LLVM_IFUNC_REPRESENTATION;
 struct ObservedCallee {
     pub name: String,
     pub representation: &'static str,
+    pub identity_scope: CallableIdentityScope,
 }
 
 /// What a call site's textual evidence says about its target.
@@ -70,6 +131,7 @@ enum ObservedCallTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedCall {
     pub caller: String,
+    pub caller_identity_scope: CallableIdentityScope,
     pub target: ObservedCallTarget,
     pub line: usize,
 }
@@ -140,14 +202,19 @@ impl EvidenceContributor for LlvmTextContributor {
                     AcquiredInputKind::TextualLlvmIr => "declared-artifact".into(),
                     AcquiredInputKind::CCompiledToLlvmIr => "compiled-source".into(),
                 },
-                content_fingerprint,
+                content_fingerprint: content_fingerprint.clone(),
             },
             observation_contexts: vec![context.clone()],
             callables: observations
                 .callables
                 .into_iter()
                 .map(|callable| ContributedCallable {
-                    contributor_callable_id: callable.name.clone(),
+                    contributor_callable_id: contributor_callable_id(
+                        &callable.name,
+                        callable.identity_scope,
+                        &content_fingerprint,
+                    ),
+                    identity_scope: callable.identity_scope,
                     display_name: callable.name,
                     defined: callable.defined,
                     representation: callable.representation.into(),
@@ -187,7 +254,11 @@ impl EvidenceContributor for LlvmTextContributor {
                         ObservedCallTarget::Direct(callee) => ContributedCallSite {
                             contributor_call_site_id,
                             kind: ContributedCallKind::Direct,
-                            caller_callable_id: call.caller,
+                            caller_callable_id: contributor_callable_id(
+                                &call.caller,
+                                call.caller_identity_scope,
+                                &content_fingerprint,
+                            ),
                             line: call.line,
                             observation_context_id: context.id.clone(),
                             resolution: Resolution::Complete,
@@ -204,7 +275,12 @@ impl EvidenceContributor for LlvmTextContributor {
                                 location: location.clone(),
                             },
                             target_claims: vec![ContributedTargetClaim {
-                                target_callable_id: callee.name.clone(),
+                                target_callable_id: contributor_callable_id(
+                                    &callee.name,
+                                    callee.identity_scope,
+                                    &content_fingerprint,
+                                ),
+                                target_identity_scope: callee.identity_scope,
                                 callee_display_name: callee.name,
                                 target_representation: callee.representation.into(),
                                 observation_context_id: context.id.clone(),
@@ -220,7 +296,11 @@ impl EvidenceContributor for LlvmTextContributor {
                         ObservedCallTarget::Indirect => ContributedCallSite {
                             contributor_call_site_id,
                             kind: ContributedCallKind::Indirect,
-                            caller_callable_id: call.caller,
+                            caller_callable_id: contributor_callable_id(
+                                &call.caller,
+                                call.caller_identity_scope,
+                                &content_fingerprint,
+                            ),
                             line: call.line,
                             observation_context_id: context.id.clone(),
                             resolution: Resolution::Absent,
@@ -744,13 +824,22 @@ fn is_call_opcode(tokens: &[LlvmToken], index: usize) -> bool {
 /// Global variables are absent by design: an operand that names one, directly
 /// or through an alias, names no callable.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum DeclaredGlobal {
+enum DeclaredGlobalKind {
     /// A `define` or `declare`.
     Function,
     /// An `alias`, which is callable only when its aliasee is.
     Alias { aliasee: CalleeOperand },
     /// An `ifunc`, whose resolver supplies the callee at load time.
     IFunc,
+}
+
+/// A module-scope global with the linkage scope its definition declares, so a
+/// call that names it can be given the identity the module gives it rather
+/// than its spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeclaredGlobal {
+    kind: DeclaredGlobalKind,
+    identity_scope: CallableIdentityScope,
 }
 
 /// Reports the alias or ifunc a module-scope definition introduces, as in
@@ -774,13 +863,22 @@ fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredG
         .find(|(_, token)| {
             matches!(&token.kind, LlvmTokenKind::Word(word) if word == "alias" || word == "ifunc")
         })?;
-    let declaration = match &keyword.kind {
-        LlvmTokenKind::Word(word) if word == "ifunc" => DeclaredGlobal::IFunc,
-        _ => DeclaredGlobal::Alias {
+    let kind = match &keyword.kind {
+        LlvmTokenKind::Word(word) if word == "ifunc" => DeclaredGlobalKind::IFunc,
+        _ => DeclaredGlobalKind::Alias {
             aliasee: alias_aliasee(tokens, index + 2 + offset),
         },
     };
-    Some((name.as_str(), declaration))
+    // An alias's linkage keywords sit between its `=` and the `alias` or
+    // `ifunc` keyword.
+    let identity_scope = declared_identity_scope(tokens, index + 2, index + 2 + offset);
+    Some((
+        name.as_str(),
+        DeclaredGlobal {
+            kind,
+            identity_scope,
+        },
+    ))
 }
 
 /// Finds where the module-scope definition containing `start` ends.
@@ -889,10 +987,11 @@ fn resolve_callee(
     declarations: &BTreeMap<String, DeclaredGlobal>,
 ) -> ObservedCallTarget {
     match callee {
-        CalleeOperand::Global(name) => match callable_representation(&name, declarations) {
-            Some(representation) => ObservedCallTarget::Direct(ObservedCallee {
+        CalleeOperand::Global(name) => match callable_declaration(&name, declarations) {
+            Some((representation, identity_scope)) => ObservedCallTarget::Direct(ObservedCallee {
                 name,
                 representation,
+                identity_scope,
             }),
             None => ObservedCallTarget::Indirect,
         },
@@ -907,27 +1006,34 @@ fn resolve_callee(
 /// is followed only to decide whether it is callable at all. A chain that
 /// reaches a global the module never declares, an aliasee the parse could not
 /// name, or a cycle is not callable.
-fn callable_representation(
+fn callable_declaration(
     name: &str,
     declarations: &BTreeMap<String, DeclaredGlobal>,
-) -> Option<&'static str> {
-    let representation = match declarations.get(name)? {
-        DeclaredGlobal::Function => LLVM_FUNCTION,
-        DeclaredGlobal::Alias { .. } => LLVM_ALIAS,
-        DeclaredGlobal::IFunc => LLVM_IFUNC,
+) -> Option<(&'static str, CallableIdentityScope)> {
+    let declared = declarations.get(name)?;
+    let representation = match declared.kind {
+        DeclaredGlobalKind::Function => LLVM_FUNCTION,
+        DeclaredGlobalKind::Alias { .. } => LLVM_ALIAS,
+        DeclaredGlobalKind::IFunc => LLVM_IFUNC,
     };
+    // The identity scope, like the representation, describes the named global
+    // itself: an `internal` alias to an external function is private to this
+    // module however visible its aliasee is.
+    let identity_scope = declared.identity_scope;
     let mut visited = BTreeSet::new();
     let mut current = name.to_owned();
     loop {
         if !visited.insert(current.clone()) {
             return None;
         }
-        match declarations.get(&current)? {
-            DeclaredGlobal::Function | DeclaredGlobal::IFunc => return Some(representation),
-            DeclaredGlobal::Alias {
+        match &declarations.get(&current)?.kind {
+            DeclaredGlobalKind::Function | DeclaredGlobalKind::IFunc => {
+                return Some((representation, identity_scope));
+            }
+            DeclaredGlobalKind::Alias {
                 aliasee: CalleeOperand::Global(aliasee),
             } => current = aliasee.clone(),
-            DeclaredGlobal::Alias {
+            DeclaredGlobalKind::Alias {
                 aliasee: CalleeOperand::Unnamed,
             } => return None,
         }
@@ -985,12 +1091,22 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
             let LlvmTokenKind::Global(name) = &tokens[name_index].kind else {
                 unreachable!()
             };
-            declarations.insert(name.clone(), DeclaredGlobal::Function);
+            // A function's linkage keywords sit between `define`/`declare`
+            // and its global name.
+            let identity_scope = declared_identity_scope(&tokens, index + 1, name_index);
+            declarations.insert(
+                name.clone(),
+                DeclaredGlobal {
+                    kind: DeclaredGlobalKind::Function,
+                    identity_scope,
+                },
+            );
             pending_globals.push(PendingGlobal::Function(ObservedCallable {
                 name: name.clone(),
                 defined,
                 line: tokens[index].line,
                 representation: LLVM_FUNCTION,
+                identity_scope,
             }));
             let signature_end = function_signature_end(&tokens, name_index).ok_or_else(|| {
                 format!("LLVM function '{name}' has an incomplete parameter list")
@@ -1043,12 +1159,15 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
                 if function_names.contains(name.as_str()) || !aliased_names.insert(name.as_str()) {
                     continue;
                 }
-                if let Some(representation) = callable_representation(name, &declarations) {
+                if let Some((representation, identity_scope)) =
+                    callable_declaration(name, &declarations)
+                {
                     observations.callables.push(ObservedCallable {
                         name: name.clone(),
                         defined: false,
                         line: *line,
                         representation,
+                        identity_scope,
                     });
                 }
             }
@@ -1064,8 +1183,14 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
         {
             continue;
         }
+        // A caller is always a function this module defines, so the module
+        // states its linkage and the call site inherits the identity the module
+        // gives its caller rather than the caller's spelling.
+        let (_, caller_identity_scope) = callable_declaration(&call.caller, &declarations)
+            .expect("a function body's caller must be a declared callable");
         observations.calls.push(ObservedCall {
             caller: call.caller,
+            caller_identity_scope,
             target,
             line: call.line,
         });

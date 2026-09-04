@@ -231,9 +231,30 @@ pub struct Manifestation {
     pub entity_id: ProgramEntityId,
     pub acquired_input_id: AcquiredInputId,
     pub contributor_callable_id: String,
+    pub identity_scope: CallableIdentityScope,
     pub observation_context_id: ObservationContextId,
     pub representation: String,
     pub defined: bool,
+}
+
+/// The boundary within which one contributor callable identity means one
+/// callable.
+///
+/// Linkage decides sameness, not spelling. A callable that is not visible
+/// beyond the acquired input it was read from — an LLVM `internal` or
+/// `private` function — is identified within that input, so two such callables
+/// in different inputs are different callables however they are spelled. A
+/// callable the link can see is identified in the namespace the link joins it
+/// by, so one identity may manifest in several acquired inputs.
+///
+/// The core never parses a contributor callable identity, so a declared scope
+/// is what lets it check that an input-scoped identity never spans acquired
+/// inputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallableIdentityScope {
+    AcquiredInput,
+    LinkedProgram,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -925,6 +946,9 @@ impl PublishedSnapshot {
         }
         let mut entity_contexts = BTreeMap::new();
         let mut contributor_manifestations = BTreeSet::new();
+        // Where each contributor callable identity has been seen, so that an
+        // identity scoped to one acquired input is caught spanning two.
+        let mut identity_scopes: BTreeMap<&str, (&str, CallableIdentityScope)> = BTreeMap::new();
         for manifestation in &self.manifestations {
             if !entities_by_id.contains_key(manifestation.entity_id.as_str()) {
                 return Err(format!(
@@ -961,6 +985,38 @@ impl PublishedSnapshot {
                     "manifestation '{}' was not published from acquired input '{}'",
                     manifestation.id, manifestation.acquired_input_id
                 ));
+            }
+            // One contributor callable identity means one callable only
+            // within the scope its contributor declared for it. An identity
+            // scoped to its acquired input names a callable nothing outside
+            // that input can be, so it may not manifest in another: two
+            // identically named translation-unit-local callables are different
+            // callables, and neither the core nor a hand-edited export may
+            // join them.
+            match identity_scopes.entry(manifestation.contributor_callable_id.as_str()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((
+                        manifestation.acquired_input_id.as_str(),
+                        manifestation.identity_scope,
+                    ));
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    let (first_input, first_scope) = *slot.get();
+                    if first_scope != manifestation.identity_scope {
+                        return Err(format!(
+                            "contributor callable identity '{}' declares {first_scope:?} identity scope on one manifestation and {:?} on another",
+                            manifestation.contributor_callable_id, manifestation.identity_scope
+                        ));
+                    }
+                    if first_scope == CallableIdentityScope::AcquiredInput
+                        && first_input != manifestation.acquired_input_id.as_str()
+                    {
+                        return Err(format!(
+                            "contributor callable identity '{}' is scoped to acquired input '{first_input}' but also manifests in acquired input '{}'; a callable that is not visible beyond one acquired input is a different callable in another",
+                            manifestation.contributor_callable_id, manifestation.acquired_input_id
+                        ));
+                    }
+                }
             }
             if !contributor_manifestations.insert((
                 manifestation.acquired_input_id.as_str(),
@@ -1891,6 +1947,7 @@ struct CallableIdentity {
     manifestation_id: ManifestationId,
     display_name: String,
     representation: String,
+    identity_scope: CallableIdentityScope,
 }
 
 #[derive(Clone)]
@@ -1947,6 +2004,7 @@ fn ensure_callable(
     contributor_callable_id: &str,
     name: &str,
     representation: &str,
+    identity_scope: CallableIdentityScope,
     snapshot_id: &ProgramSnapshotId,
     input_index: usize,
     acquired_input_id: &AcquiredInputId,
@@ -1959,9 +2017,12 @@ fn ensure_callable(
     let callable_index = identities.values().map(BTreeMap::len).sum::<usize>();
     let context_identities = identities.entry(context_id.clone()).or_default();
     if let Some(identity) = context_identities.get(contributor_callable_id) {
-        if identity.display_name != name || identity.representation != representation {
+        if identity.display_name != name
+            || identity.representation != representation
+            || identity.identity_scope != identity_scope
+        {
             return Err(format!(
-                "contributed callable identity '{contributor_callable_id}' has conflicting labels or representations in observation context '{context_id}'"
+                "contributed callable identity '{contributor_callable_id}' has conflicting labels, representations, or identity scopes in observation context '{context_id}'"
             ));
         }
         if defined {
@@ -1996,6 +2057,7 @@ fn ensure_callable(
         entity_id: entity_id.clone(),
         acquired_input_id: acquired_input_id.clone(),
         contributor_callable_id: contributor_callable_id.into(),
+        identity_scope,
         observation_context_id: context_id.clone(),
         representation: representation.into(),
         defined,
@@ -2007,6 +2069,7 @@ fn ensure_callable(
             manifestation_id: manifestation_id.clone(),
             display_name: name.into(),
             representation: representation.into(),
+            identity_scope,
         },
     );
     Ok(CallableReference {
@@ -2157,6 +2220,7 @@ pub(crate) fn publish(
                 &function.contributor_callable_id,
                 &function.display_name,
                 &function.representation,
+                function.identity_scope,
                 &snapshot_id,
                 input_index,
                 &input_id,
@@ -2370,6 +2434,7 @@ pub(crate) fn publish(
                     &target.target_callable_id,
                     &target.callee_display_name,
                     &target.target_representation,
+                    target.target_identity_scope,
                     &snapshot_id,
                     input_index,
                     &input_id,
