@@ -8,8 +8,8 @@ use crate::contributor::{
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{
-    CallableIdentityScope, CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext,
-    Resolution,
+    CallableIdentityScope, CompletenessBasis, ContributorCallableIdentity, EvidenceScope,
+    EvidenceSupport, ObservationContext, Resolution,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -72,7 +72,7 @@ fn declared_identity_scope(
     {
         CallableIdentityScope::AcquiredInput
     } else {
-        CallableIdentityScope::LinkedProgram
+        CallableIdentityScope::LinkageNamespace
     }
 }
 
@@ -87,17 +87,19 @@ fn declared_identity_scope(
 /// different identity. Two acquisitions of the same module text share a
 /// fingerprint and are, as #23 established for call-site identities, genuinely
 /// indistinguishable to this contributor.
-fn contributor_callable_id(
+fn contributor_callable_identity(
     name: &str,
     identity_scope: CallableIdentityScope,
     content_fingerprint: &str,
-) -> String {
-    match identity_scope {
-        CallableIdentityScope::LinkedProgram => format!("llvm-symbol:{name}"),
+) -> ContributorCallableIdentity {
+    let id = match identity_scope {
+        CallableIdentityScope::LinkageNamespace => format!("llvm-symbol:{name}"),
         CallableIdentityScope::AcquiredInput => {
             format!("llvm-module-local:{content_fingerprint}:{name}")
         }
-    }
+    };
+    ContributorCallableIdentity::new(id, identity_scope)
+        .expect("generated contributor callable identity must be well formed")
 }
 
 /// How a callable global is written in the module, kept as the representation
@@ -209,12 +211,11 @@ impl EvidenceContributor for LlvmTextContributor {
                 .callables
                 .into_iter()
                 .map(|callable| ContributedCallable {
-                    contributor_callable_id: contributor_callable_id(
+                    callable_identity: contributor_callable_identity(
                         &callable.name,
                         callable.identity_scope,
                         &content_fingerprint,
                     ),
-                    identity_scope: callable.identity_scope,
                     display_name: callable.name,
                     defined: callable.defined,
                     representation: callable.representation.into(),
@@ -254,7 +255,7 @@ impl EvidenceContributor for LlvmTextContributor {
                         ObservedCallTarget::Direct(callee) => ContributedCallSite {
                             contributor_call_site_id,
                             kind: ContributedCallKind::Direct,
-                            caller_callable_id: contributor_callable_id(
+                            caller_callable_identity: contributor_callable_identity(
                                 &call.caller,
                                 call.caller_identity_scope,
                                 &content_fingerprint,
@@ -275,12 +276,11 @@ impl EvidenceContributor for LlvmTextContributor {
                                 location: location.clone(),
                             },
                             target_claims: vec![ContributedTargetClaim {
-                                target_callable_id: contributor_callable_id(
+                                target_callable_identity: contributor_callable_identity(
                                     &callee.name,
                                     callee.identity_scope,
                                     &content_fingerprint,
                                 ),
-                                target_identity_scope: callee.identity_scope,
                                 callee_display_name: callee.name,
                                 target_representation: callee.representation.into(),
                                 observation_context_id: context.id.clone(),
@@ -296,7 +296,7 @@ impl EvidenceContributor for LlvmTextContributor {
                         ObservedCallTarget::Indirect => ContributedCallSite {
                             contributor_call_site_id,
                             kind: ContributedCallKind::Indirect,
-                            caller_callable_id: contributor_callable_id(
+                            caller_callable_identity: contributor_callable_identity(
                                 &call.caller,
                                 call.caller_identity_scope,
                                 &content_fingerprint,
@@ -1198,56 +1198,72 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     Ok(observations)
 }
 
-/// The identity a callable has in the prototype graph.
+/// The opaque identity a callable has in the prototype graph.
 ///
-/// A callable the link can see is one node across the inputs a build merges,
-/// which is what the link does with it. One that is private to its translation
-/// unit is a node of its own in every unit that declares one, so two
-/// identically named local callables never merge and no path can cross between
-/// them. The label stays the display name either way.
-fn graph_node_id(
-    name: &str,
-    identity_scope: CallableIdentityScope,
-    source: Option<&str>,
-) -> String {
-    match (identity_scope, source) {
-        (CallableIdentityScope::AcquiredInput, Some(source)) => format!("{name}@{source}"),
-        _ => name.to_owned(),
-    }
+/// It is derived from the contributor's scoped identity evidence, not from the
+/// callable's display label. A linkage-namespace identity therefore remains
+/// one graph identity across inputs, while an acquired-input identity is also
+/// qualified by its input. Hashing the qualified evidence keeps the legacy
+/// schema's human-readable label separate from its machine identity.
+fn graph_node_id(identity: &ContributorCallableIdentity, source: Option<&str>) -> String {
+    let input_qualifier = match identity.scope() {
+        CallableIdentityScope::AcquiredInput => source.unwrap_or("in-memory LLVM IR"),
+        CallableIdentityScope::LinkageNamespace => "linkage namespace",
+    };
+    format!(
+        "callable:{}",
+        fingerprint_parts(&[identity.as_str(), input_qualifier])
+    )
 }
 
 pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> {
     let observations = observe_llvm_ir(text)?;
+    let content_fingerprint = fingerprint_parts(&[text]);
     let mut graph = Graph::default();
     if let Some(source) = source {
         graph.inputs.push(source.into());
     }
     for callable in observations.callables {
+        let identity = contributor_callable_identity(
+            &callable.name,
+            callable.identity_scope,
+            &content_fingerprint,
+        );
         graph.add_node(Node::callable(
-            graph_node_id(&callable.name, callable.identity_scope, source),
+            graph_node_id(&identity, source),
             callable.name,
             callable.defined,
             source.map(str::to_owned),
         ));
     }
     for call in observations.calls {
-        let caller = graph_node_id(&call.caller, call.caller_identity_scope, source);
+        let caller_identity = contributor_callable_identity(
+            &call.caller,
+            call.caller_identity_scope,
+            &content_fingerprint,
+        );
+        let caller = graph_node_id(&caller_identity, source);
         match call.target {
             ObservedCallTarget::Direct(callee) => {
-                let callee_id = graph_node_id(&callee.name, callee.identity_scope, source);
+                let callee_identity = contributor_callable_identity(
+                    &callee.name,
+                    callee.identity_scope,
+                    &content_fingerprint,
+                );
+                let callee_id = graph_node_id(&callee_identity, source);
                 graph.add_node(Node::callable(&callee_id, &callee.name, false, None));
                 graph.add_edge(&caller, &callee_id, "direct-call");
             }
             ObservedCallTarget::Indirect => {
                 graph.add_node(Node {
-                    id: "<indirect>".into(),
+                    id: "unknown:indirect-call-target".into(),
                     label: "indirect call".into(),
                     kind: "unknown".into(),
                     defined: false,
                     language: "llvm".into(),
                     source: None,
                 });
-                graph.add_edge(&caller, "<indirect>", "indirect-call");
+                graph.add_edge(&caller, "unknown:indirect-call-target", "indirect-call");
             }
         }
     }
@@ -1314,6 +1330,16 @@ pub fn graph_from_path(path: &Path, clang: &str, flags: &[String]) -> Result<Gra
 mod tests {
     use super::*;
 
+    fn node_id(graph: &Graph, label: &str) -> String {
+        graph
+            .nodes
+            .values()
+            .find(|node| node.label == label)
+            .unwrap_or_else(|| panic!("missing graph node labelled {label:?}"))
+            .id
+            .clone()
+    }
+
     const IR: &str = r#"
 declare i32 @puts(ptr)
 define i32 @main() {
@@ -1335,15 +1361,18 @@ define i32 @"odd.name"(i32 %n) {
     #[test]
     fn extracts_and_coalesces_calls() {
         let graph = parse_llvm_ir(IR, Some("fixture.ll")).unwrap();
-        assert!(graph.nodes["main"].defined);
-        assert!(!graph.nodes["puts"].defined);
+        let main = node_id(&graph, "main");
+        let worker = node_id(&graph, "worker");
+        let puts = node_id(&graph, "puts");
+        assert!(graph.nodes[&main].defined);
+        assert!(!graph.nodes[&puts].defined);
         assert_eq!(
-            graph.edges[&("main".into(), "worker".into(), "direct-call".into())].call_count,
+            graph.edges[&(main.clone(), worker, "direct-call".into())].call_count,
             2
         );
         assert!(graph.edges.contains_key(&(
-            "main".into(),
-            "<indirect>".into(),
+            main,
+            "unknown:indirect-call-target".into(),
             "indirect-call".into()
         )));
     }
@@ -1384,22 +1413,28 @@ declare void @declared_target()"#;
             "cycle",
             "other_cycle",
         ] {
-            assert!(!graph.nodes.contains_key(uncallable));
+            assert!(!graph.nodes.values().any(|node| node.label == uncallable));
         }
+        let caller = node_id(&graph, "caller");
         assert!(graph.edges.contains_key(&(
-            "caller".into(),
-            "<indirect>".into(),
+            caller.clone(),
+            "unknown:indirect-call-target".into(),
             "indirect-call".into()
         )));
         for callable in ["declared_target", "function_alias", "split_alias"] {
             assert!(graph.edges.contains_key(&(
-                "caller".into(),
-                callable.into(),
+                caller.clone(),
+                node_id(&graph, callable),
                 "direct-call".into()
             )));
         }
         assert_eq!(
-            graph.edges[&("caller".into(), "<indirect>".into(), "indirect-call".into())].call_count,
+            graph.edges[&(
+                caller,
+                "unknown:indirect-call-target".into(),
+                "indirect-call".into()
+            )]
+                .call_count,
             4
         );
     }

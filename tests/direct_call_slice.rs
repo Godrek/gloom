@@ -128,6 +128,7 @@ fn explains_one_direct_call_from_evidence_to_projection() {
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
     assert_eq!(result.query_name, "callees");
     assert_eq!(result.relationships.len(), 1);
     let relationship = &result.relationships[0];

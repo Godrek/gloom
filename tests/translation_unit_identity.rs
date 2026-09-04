@@ -12,10 +12,11 @@
 //! These tests hold that acquisition, search, query, export, and display all
 //! treat a display name as a label and never as an identity.
 
-use gloom::app::{Application, CallableSearch, NamedQuery, Query};
+use gloom::app::{Application, NamedQuery, Query};
 use gloom::{
-    CallableIdentityScope, LlvmTextContributor, Manifestation, ObservationContext, ProgramEntity,
-    ProgramEntityKind, PublishedSnapshot, SearchedCallable,
+    CallPathResult, CallRelationshipsResult, CallableIdentityScope, LlvmTextContributor,
+    Manifestation, ObservationContext, ProgramEntity, ProgramEntityKind, PublishedSnapshot,
+    SearchedCallable,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -71,7 +72,7 @@ fn manifestations_of<'a>(snapshot: &'a PublishedSnapshot, label: &str) -> Vec<&'
 
 /// The callees one caller entity reaches, as `caller -> callee` labels.
 fn callees(snapshot: &PublishedSnapshot, caller: &ProgramEntity) -> Vec<String> {
-    Application
+    let result = Application
         .query_snapshot(
             snapshot,
             NamedQuery::Callees {
@@ -79,6 +80,9 @@ fn callees(snapshot: &PublishedSnapshot, caller: &ProgramEntity) -> Vec<String> 
                 caller_entity_id: Some(caller.id.clone()),
             },
         )
+        .unwrap();
+    result
+        .call_relationships()
         .unwrap()
         .relationships
         .iter()
@@ -91,16 +95,26 @@ fn callees(snapshot: &PublishedSnapshot, caller: &ProgramEntity) -> Vec<String> 
         .collect()
 }
 
+fn relationship_query(snapshot: &PublishedSnapshot, query: NamedQuery) -> CallRelationshipsResult {
+    let result = Application.query_snapshot(snapshot, query).unwrap();
+    result.call_relationships().unwrap().clone()
+}
+
+fn path_query(snapshot: &PublishedSnapshot, query: NamedQuery) -> CallPathResult {
+    let result = Application.query_snapshot(snapshot, query).unwrap();
+    result.call_path().unwrap().clone()
+}
+
 fn search(snapshot: &PublishedSnapshot, label: &str) -> Vec<SearchedCallable> {
-    Application
-        .search_snapshot_callables(
+    let result = Application
+        .query_snapshot(
             snapshot,
-            CallableSearch {
+            NamedQuery::CallableSearch {
                 label: label.into(),
             },
         )
-        .unwrap()
-        .callables
+        .unwrap();
+    result.callable_search().unwrap().callables.clone()
 }
 
 /// Criterion 1: two translation units that each write an identically named
@@ -119,7 +133,8 @@ fn identically_named_local_callables_are_distinct_entities_and_manifestations() 
     assert_eq!(manifestations.len(), 2, "{manifestations:?}");
     assert_ne!(manifestations[0].id, manifestations[1].id);
     assert_ne!(
-        manifestations[0].contributor_callable_id, manifestations[1].contributor_callable_id,
+        manifestations[0].contributor_callable_identity,
+        manifestations[1].contributor_callable_identity,
         "a callable private to one translation unit cannot carry another unit's identity"
     );
     assert_ne!(
@@ -128,7 +143,7 @@ fn identically_named_local_callables_are_distinct_entities_and_manifestations() 
     );
     for manifestation in &manifestations {
         assert_eq!(
-            manifestation.identity_scope,
+            manifestation.contributor_callable_identity.scope(),
             CallableIdentityScope::AcquiredInput
         );
         assert!(manifestation.defined);
@@ -160,15 +175,13 @@ fn direct_calls_resolve_to_the_local_callable_of_their_own_translation_unit() {
         ("second_entry", second_helper),
     ] {
         let caller = callables(&snapshot, entry)[0];
-        let result = Application
-            .query_snapshot(
-                &snapshot,
-                NamedQuery::Callees {
-                    caller_name: entry.into(),
-                    caller_entity_id: Some(caller.id.clone()),
-                },
-            )
-            .unwrap();
+        let result = relationship_query(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: entry.into(),
+                caller_entity_id: Some(caller.id.clone()),
+            },
+        );
         let reached = result
             .relationships
             .iter()
@@ -198,7 +211,7 @@ fn callable_search_distinguishes_identically_named_locals() {
             (
                 manifestation.acquired_input_path.clone(),
                 declaration.source_location.line,
-                manifestation.identity_scope,
+                manifestation.contributor_callable_identity.scope(),
             )
         })
         .collect::<Vec<_>>();
@@ -241,79 +254,101 @@ fn callable_search_distinguishes_identically_named_locals() {
     );
 }
 
-/// Criterion 4: no query crosses between the two unrelated local callables —
-/// neither the snapshot's named callees query nor the prototype graph's
-/// reachability and path queries.
+/// Criterion 4: the shared named-query seam's caller, callee, and bounded path
+/// behavior never crosses between unrelated local callables.
 #[test]
 fn named_queries_never_cross_between_unrelated_local_callables() {
     let snapshot = published("local-shadow-queries");
-    for helper in callables(&snapshot, "helper") {
+    let helpers = callables(&snapshot, "helper");
+    for (helper, expected_caller, expected_callee) in [
+        (helpers[0], "first_entry", "first_only"),
+        (helpers[1], "second_entry", "second_only"),
+    ] {
         let reached = callees(&snapshot, helper);
-        assert_eq!(reached.len(), 1, "{reached:?}");
+        assert_eq!(reached, [format!("helper -> {expected_callee}")]);
+
+        let callers = relationship_query(
+            &snapshot,
+            NamedQuery::Callers {
+                callee_name: "helper".into(),
+                callee_entity_id: Some(helper.id.clone()),
+            },
+        );
+        assert_eq!(callers.relationships.len(), 1);
+        assert_eq!(
+            callers.relationships[0].caller_display_name,
+            expected_caller
+        );
+        assert_eq!(callers.relationships[0].callee_entity_id, helper.id);
     }
 
-    let document = Application
-        .build(
-            &[PathBuf::from(FIRST_UNIT), PathBuf::from(SECOND_UNIT)],
-            "clang",
-            &[],
-        )
-        .unwrap();
+    let first_entry = callables(&snapshot, "first_entry")[0];
+    let first_only = callables(&snapshot, "first_only")[0];
+    let second_only = callables(&snapshot, "second_only")[0];
 
-    // `first_entry` reaches its own unit's callables and the shared symbol, and
-    // nothing of the second unit.
-    let reachable = serde_json::to_value(
-        Application
-            .query(
-                document.clone(),
-                Query::Reachable {
-                    start: "first_entry".into(),
-                },
-            )
-            .unwrap(),
-    )
-    .unwrap();
+    let local_path = path_query(
+        &snapshot,
+        NamedQuery::CallPath {
+            start_name: "first_entry".into(),
+            start_entity_id: Some(first_entry.id.clone()),
+            end_name: "first_only".into(),
+            end_entity_id: Some(first_only.id.clone()),
+            max_relationships: 2,
+        },
+    );
     assert_eq!(
-        reachable,
-        serde_json::json!([
-            "first_only",
-            format!("helper@{FIRST_UNIT}"),
-            "shared_service"
-        ])
+        local_path
+            .path
+            .unwrap()
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["helper", "first_only"]
     );
 
-    // There is no path from one unit's entry point to the other unit's private
-    // callee, because nothing joins the two `helper` callables.
-    assert_eq!(
-        serde_json::to_value(
-            Application
-                .query(
-                    document.clone(),
-                    Query::ShortestPath {
-                        start: "first_entry".into(),
-                        end: "second_only".into(),
-                    },
-                )
-                .unwrap()
-        )
-        .unwrap(),
-        Value::Null
+    let cross_unit = path_query(
+        &snapshot,
+        NamedQuery::CallPath {
+            start_name: "first_entry".into(),
+            start_entity_id: Some(first_entry.id.clone()),
+            end_name: "second_only".into(),
+            end_entity_id: Some(second_only.id.clone()),
+            max_relationships: 4,
+        },
+    );
+    assert!(cross_unit.path.is_none());
+
+    let bounded = path_query(
+        &snapshot,
+        NamedQuery::CallPath {
+            start_name: "first_entry".into(),
+            start_entity_id: Some(first_entry.id.clone()),
+            end_name: "first_only".into(),
+            end_entity_id: Some(first_only.id.clone()),
+            max_relationships: 1,
+        },
+    );
+    assert!(
+        bounded.path.is_none(),
+        "the relationship bound must be enforced"
     );
 
-    // An ambiguous label is reported with the identities to choose from rather
-    // than resolved by picking one.
     let error = Application
-        .query(
-            document,
-            Query::Reachable {
-                start: "helper".into(),
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::CallPath {
+                start_name: "helper".into(),
+                start_entity_id: None,
+                end_name: "first_only".into(),
+                end_entity_id: Some(first_only.id.clone()),
+                max_relationships: 2,
             },
         )
         .unwrap_err();
     assert!(
         error.contains("is ambiguous")
-            && error.contains(&format!("helper@{FIRST_UNIT}"))
-            && error.contains(&format!("helper@{SECOND_UNIT}")),
+            && error.contains(&format!("declared at {FIRST_UNIT}:12"))
+            && error.contains(&format!("declared at {SECOND_UNIT}:12")),
         "unexpected error: {error}"
     );
 }
@@ -361,6 +396,12 @@ fn export_and_viewer_labels_stay_readable_without_being_identities() {
         .collect::<Vec<_>>();
     assert_eq!(helpers.len(), 2, "{helpers:?}");
     assert_ne!(helpers[0].id, helpers[1].id);
+    for helper in &helpers {
+        assert!(helper.id.starts_with("callable:fnv1a64:"));
+        assert!(!helper.id.contains(&helper.label));
+        assert!(!helper.id.contains(FIRST_UNIT));
+        assert!(!helper.id.contains(SECOND_UNIT));
+    }
     // The one exported callable both units name is one node, as the link makes
     // it one symbol.
     assert_eq!(
@@ -371,13 +412,33 @@ fn export_and_viewer_labels_stay_readable_without_being_identities() {
             .count(),
         1
     );
+
+    let reachable = serde_json::to_value(
+        Application
+            .query(
+                document,
+                Query::Reachable {
+                    start: "first_entry".into(),
+                },
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let reachable = reachable.as_array().unwrap();
+    assert!(reachable.iter().all(|entity| {
+        entity["entity_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("callable:")
+            && entity["display_name"].as_str().is_some()
+    }));
 }
 
 /// Criterion 6: nothing corresponds because two callables are spelled the same
-/// way. The exported symbol both units name carries one contributor callable
-/// identity in the namespace the link joins it by — the evidence a link-time
-/// correspondence claim would rest on — while the two locals carry identities
-/// scoped to their own inputs and can never be joined.
+/// way. The exported symbol both units name carries one explicitly scoped
+/// contributor callable identity in the linkage namespace, so its definition
+/// and declaration are manifestations of one entity. The same label on the two
+/// input-scoped locals supplies no such evidence and never joins them.
 #[test]
 fn equal_names_alone_create_no_correspondence_claim() {
     let snapshot = published("local-shadow-correspondence");
@@ -390,21 +451,50 @@ fn equal_names_alone_create_no_correspondence_claim() {
 
     let shared = manifestations_of(&snapshot, "shared_service");
     assert_eq!(shared.len(), 2, "{shared:?}");
+    let shared_entities = callables(&snapshot, "shared_service");
+    assert_eq!(shared_entities.len(), 1, "{shared_entities:?}");
+    assert!(
+        shared
+            .iter()
+            .all(|manifestation| manifestation.entity_id == shared_entities[0].id)
+    );
+    assert_eq!(
+        shared
+            .iter()
+            .map(|manifestation| manifestation.defined)
+            .collect::<Vec<_>>(),
+        [true, false]
+    );
     assert_ne!(shared[0].acquired_input_id, shared[1].acquired_input_id);
     assert_eq!(
-        shared[0].contributor_callable_id, shared[1].contributor_callable_id,
+        shared[0].contributor_callable_identity, shared[1].contributor_callable_identity,
         "an exported symbol is one identity in the namespace the link joins it by"
     );
     for manifestation in &shared {
         assert_eq!(
-            manifestation.identity_scope,
-            CallableIdentityScope::LinkedProgram
+            manifestation.contributor_callable_identity.scope(),
+            CallableIdentityScope::LinkageNamespace
         );
     }
-    // The two units are one observation context, and correspondence is derived
-    // only from contributor-identity evidence spanning observation contexts, so
-    // the link-time claim these manifestations would support awaits evidence of
-    // the link itself rather than being inferred here.
+
+    let second_entry = callables(&snapshot, "second_entry")[0];
+    let from_second = relationship_query(
+        &snapshot,
+        NamedQuery::Callees {
+            caller_name: "second_entry".into(),
+            caller_entity_id: Some(second_entry.id.clone()),
+        },
+    );
+    let shared_call = from_second
+        .relationships
+        .iter()
+        .find(|relationship| relationship.callee_display_name == "shared_service")
+        .unwrap();
+    assert_eq!(shared_call.callee_entity_id, shared_entities[0].id);
+
+    // A scoped contributor identity establishes sameness within this one
+    // observation context. Correspondence remains reserved for manifestations
+    // across contexts, so no correspondence claim is invented from the label.
     assert_eq!(snapshot.observation_contexts().len(), 1);
 }
 
@@ -416,11 +506,14 @@ fn an_input_scoped_callable_identity_may_not_span_acquired_inputs() {
     let mut document: Value =
         serde_json::from_str(&Application.export_snapshot_json(&snapshot).unwrap()).unwrap();
     let joined = manifestations_of(&snapshot, "helper")[0]
-        .contributor_callable_id
-        .clone();
+        .contributor_callable_identity
+        .as_str()
+        .to_owned();
     for manifestation in document["manifestations"].as_array_mut().unwrap() {
-        if manifestation["identity_scope"] == serde_json::json!("acquired-input") {
-            manifestation["contributor_callable_id"] = serde_json::json!(joined);
+        if manifestation["contributor_callable_identity"]["scope"]
+            == serde_json::json!("acquired-input")
+        {
+            manifestation["contributor_callable_identity"]["id"] = serde_json::json!(joined);
         }
     }
 
@@ -479,7 +572,10 @@ fn linkage_decides_identity_scope_wherever_the_keyword_may_sit() {
                 .iter()
                 .find(|entity| entity.id == manifestation.entity_id)
                 .unwrap();
-            (entity.display_name.as_str(), manifestation.identity_scope)
+            (
+                entity.display_name.as_str(),
+                manifestation.contributor_callable_identity.scope(),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -488,13 +584,13 @@ fn linkage_decides_identity_scope_wherever_the_keyword_may_sit() {
         [
             ("tricky_local", CallableIdentityScope::AcquiredInput),
             ("struct_local", CallableIdentityScope::AcquiredInput),
-            ("exported_odr", CallableIdentityScope::LinkedProgram),
+            ("exported_odr", CallableIdentityScope::LinkageNamespace),
             ("quoted internal", CallableIdentityScope::AcquiredInput),
             ("alias_local", CallableIdentityScope::AcquiredInput),
-            ("alias_public", CallableIdentityScope::LinkedProgram),
+            ("alias_public", CallableIdentityScope::LinkageNamespace),
             ("ifunc_local", CallableIdentityScope::AcquiredInput),
             ("resolver", CallableIdentityScope::AcquiredInput),
-            ("user", CallableIdentityScope::LinkedProgram),
+            ("user", CallableIdentityScope::LinkageNamespace),
         ]
     );
 }

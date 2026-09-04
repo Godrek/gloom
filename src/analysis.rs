@@ -109,14 +109,18 @@ pub fn entry_points(graph: &Graph) -> Vec<String> {
 /// node; otherwise it is matched against labels, and an ambiguous label is
 /// reported with the identities to choose from rather than resolved by picking
 /// one of them.
-pub fn resolve(graph: &Graph, selector: &str) -> Result<String, String> {
-    if graph.nodes.contains_key(selector) {
+pub fn resolve_callable_selector(graph: &Graph, selector: &str) -> Result<String, String> {
+    if graph
+        .nodes
+        .get(selector)
+        .is_some_and(|node| node.kind == "function")
+    {
         return Ok(selector.to_owned());
     }
     let matched = graph
         .nodes
         .values()
-        .filter(|node| node.label == selector)
+        .filter(|node| node.kind == "function" && node.label == selector)
         .map(|node| node.id.as_str())
         .collect::<Vec<_>>();
     match matched.as_slice() {

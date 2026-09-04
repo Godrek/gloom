@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use gloom::app::{Application, CallableSearch, NamedQuery, Query};
-use gloom::{LlvmTextContributor, ObservationContext};
+use gloom::app::{Application, NamedQuery, Query};
+use gloom::{LlvmTextContributor, ObservationContext, ProgramEntityId, PublishedSnapshot};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -77,22 +77,52 @@ enum Commands {
         #[arg(
             long,
             value_name = "LABEL",
-            conflicts_with_all = ["callees", "explain"],
-            required_unless_present_any = ["callees", "explain"]
+            conflicts_with_all = ["callees", "callers", "call_path", "explain"],
+            required_unless_present_any = ["callees", "callers", "call_path", "explain"]
         )]
         search_callables: Option<String>,
         #[arg(
             long,
-            conflicts_with_all = ["explain", "search_callables"],
-            required_unless_present_any = ["explain", "search_callables"]
+            conflicts_with_all = ["callers", "call_path", "explain", "search_callables"],
+            required_unless_present_any = ["callers", "call_path", "explain", "search_callables"]
         )]
         callees: Option<String>,
-        #[arg(long, requires = "callees", conflicts_with_all = ["explain", "search_callables"])]
+        #[arg(
+            long,
+            requires = "callees",
+            conflicts_with_all = ["callers", "call_path", "explain", "search_callables"]
+        )]
         caller_entity_id: Option<String>,
         #[arg(
             long,
-            conflicts_with_all = ["callees", "search_callables"],
-            required_unless_present_any = ["callees", "search_callables"]
+            conflicts_with_all = ["callees", "call_path", "explain", "search_callables"],
+            required_unless_present_any = ["callees", "call_path", "explain", "search_callables"]
+        )]
+        callers: Option<String>,
+        #[arg(
+            long,
+            requires = "callers",
+            conflicts_with_all = ["callees", "call_path", "explain", "search_callables"]
+        )]
+        callee_entity_id: Option<String>,
+        #[arg(
+            long = "call-path",
+            num_args = 2,
+            value_names = ["FROM", "TO"],
+            conflicts_with_all = ["callees", "callers", "explain", "search_callables"],
+            required_unless_present_any = ["callees", "callers", "explain", "search_callables"]
+        )]
+        call_path: Option<Vec<String>>,
+        #[arg(long, requires = "call_path")]
+        start_entity_id: Option<String>,
+        #[arg(long, requires = "call_path")]
+        end_entity_id: Option<String>,
+        #[arg(long, requires = "call_path")]
+        max_relationships: Option<usize>,
+        #[arg(
+            long,
+            conflicts_with_all = ["callees", "callers", "call_path", "search_callables"],
+            required_unless_present_any = ["callees", "callers", "call_path", "search_callables"]
         )]
         explain: Option<String>,
     },
@@ -111,6 +141,23 @@ fn read(path: &Path) -> Result<String, String> {
 
 fn write(path: &Path, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn snapshot_entity_id(
+    snapshot: &PublishedSnapshot,
+    requested_id: Option<String>,
+    role: &str,
+) -> Result<Option<ProgramEntityId>, String> {
+    requested_id
+        .map(|requested_id| {
+            snapshot
+                .program_entities()
+                .iter()
+                .find(|entity| entity.id.as_str() == requested_id)
+                .map(|entity| entity.id.clone())
+                .ok_or_else(|| format!("unknown {role} entity '{requested_id}'"))
+        })
+        .transpose()
 }
 
 fn run() -> Result<(), String> {
@@ -209,31 +256,54 @@ fn run() -> Result<(), String> {
             search_callables,
             callees,
             caller_entity_id,
+            callers,
+            callee_entity_id,
+            call_path,
+            start_entity_id,
+            end_entity_id,
+            max_relationships,
             explain,
         } => {
             let published = application
                 .load_snapshot_json(&read(&snapshot)?)
                 .map_err(|error| format!("{}: {error}", snapshot.display()))?;
             let value = if let Some(label) = search_callables {
-                serde_json::to_value(
-                    application.search_snapshot_callables(&published, CallableSearch { label })?,
-                )
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::CallableSearch { label },
+                )?)
             } else if let Some(caller_name) = callees {
-                let caller_entity_id = caller_entity_id
-                    .map(|requested_id| {
-                        published
-                            .program_entities()
-                            .iter()
-                            .find(|entity| entity.id.as_str() == requested_id)
-                            .map(|entity| entity.id.clone())
-                            .ok_or_else(|| format!("unknown caller entity '{requested_id}'"))
-                    })
-                    .transpose()?;
+                let caller_entity_id =
+                    snapshot_entity_id(&published, caller_entity_id, "caller")?;
                 serde_json::to_value(application.query_snapshot(
                     &published,
                     NamedQuery::Callees {
                         caller_name,
                         caller_entity_id,
+                    },
+                )?)
+            } else if let Some(callee_name) = callers {
+                let callee_entity_id =
+                    snapshot_entity_id(&published, callee_entity_id, "callee")?;
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::Callers {
+                        callee_name,
+                        callee_entity_id,
+                    },
+                )?)
+            } else if let Some(points) = call_path {
+                let start_entity_id =
+                    snapshot_entity_id(&published, start_entity_id, "start")?;
+                let end_entity_id = snapshot_entity_id(&published, end_entity_id, "end")?;
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::CallPath {
+                        start_name: points[0].clone(),
+                        start_entity_id,
+                        end_name: points[1].clone(),
+                        end_entity_id,
+                        max_relationships: max_relationships.unwrap_or(8),
                     },
                 )?)
             } else if let Some(handle) = explain {
@@ -246,7 +316,9 @@ fn run() -> Result<(), String> {
                     .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
                 serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
             } else {
-                unreachable!("clap requires --search-callables, --callees, or --explain")
+                unreachable!(
+                    "clap requires --search-callables, --callees, --callers, --call-path, or --explain"
+                )
             }
             .map_err(|error| error.to_string())?;
             println!(

@@ -3,8 +3,8 @@ use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
 use crate::snapshot::{
-    CallableSearchResult, Explanation, ExplanationHandle, NamedQueryResult, ObservationContext,
-    ProgramEntityId, PublishedSnapshot,
+    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, ProgramEntityId,
+    PublishedSnapshot,
 };
 use crate::viewer;
 use serde::Serialize;
@@ -23,31 +23,39 @@ pub enum Query {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NamedQuery {
+    CallableSearch {
+        label: String,
+    },
     Callees {
         caller_name: String,
         caller_entity_id: Option<ProgramEntityId>,
     },
+    Callers {
+        callee_name: String,
+        callee_entity_id: Option<ProgramEntityId>,
+    },
+    CallPath {
+        start_name: String,
+        start_entity_id: Option<ProgramEntityId>,
+        end_name: String,
+        end_entity_id: Option<ProgramEntityId>,
+        max_relationships: usize,
+    },
 }
 
-/// The named query that finds callable entities by label.
-///
-/// It answers with entity identities and the acquired input and declaration
-/// behind each one, so a user who knows only a name can pick the callable they
-/// meant before naming it to another query. It keeps its own entry point
-/// because its result is a different projection from a caller's outgoing
-/// calls; issue #8 owns the full named-query surface.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CallableSearch {
-    pub label: String,
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct QueryEntity {
+    pub entity_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum QueryResult {
     Summary(crate::model::AnalysisSummary),
-    PotentialRecursiveCycles(Vec<Vec<String>>),
-    Reachable(Vec<String>),
-    ShortestPath(Option<Vec<String>>),
+    PotentialRecursiveCycles(Vec<Vec<QueryEntity>>),
+    Reachable(Vec<QueryEntity>),
+    ShortestPath(Option<Vec<QueryEntity>>),
 }
 
 impl Application {
@@ -71,19 +79,35 @@ impl Application {
         query: NamedQuery,
     ) -> Result<NamedQueryResult, String> {
         match query {
+            NamedQuery::CallableSearch { label } => Ok(NamedQueryResult::CallableSearch(
+                snapshot.search_callables(&label),
+            )),
             NamedQuery::Callees {
                 caller_name,
                 caller_entity_id,
-            } => snapshot.query_callees(&caller_name, caller_entity_id.as_ref()),
+            } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callees(&caller_name, caller_entity_id.as_ref())?,
+            )),
+            NamedQuery::Callers {
+                callee_name,
+                callee_entity_id,
+            } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callers(&callee_name, callee_entity_id.as_ref())?,
+            )),
+            NamedQuery::CallPath {
+                start_name,
+                start_entity_id,
+                end_name,
+                end_entity_id,
+                max_relationships,
+            } => Ok(NamedQueryResult::CallPath(snapshot.query_call_path(
+                &start_name,
+                start_entity_id.as_ref(),
+                &end_name,
+                end_entity_id.as_ref(),
+                max_relationships,
+            )?)),
         }
-    }
-
-    pub fn search_snapshot_callables(
-        &self,
-        snapshot: &PublishedSnapshot,
-        query: CallableSearch,
-    ) -> Result<CallableSearchResult, String> {
-        Ok(snapshot.search_callables(&query.label))
     }
 
     pub fn explain_snapshot(
@@ -147,23 +171,27 @@ impl Application {
         let graph = document.into_graph();
         Ok(match query {
             Query::Summary => QueryResult::Summary(analysis::summary(&graph)),
-            Query::PotentialRecursiveCycles => {
-                QueryResult::PotentialRecursiveCycles(analysis::cycles(&graph))
-            }
+            Query::PotentialRecursiveCycles => QueryResult::PotentialRecursiveCycles(
+                analysis::cycles(&graph)
+                    .into_iter()
+                    .map(|cycle| query_entities(&graph, cycle))
+                    .collect(),
+            ),
             // A starting point is selected by identity. A user may type a
             // display name, which is a label several callables can share, so it
             // is resolved to one identity first and an ambiguous label is
             // reported rather than resolved by picking a callable.
-            Query::Reachable { start } => QueryResult::Reachable(analysis::reachable(
-                &graph,
-                &analysis::resolve(&graph, &start)?,
-            )?),
+            Query::Reachable { start } => {
+                let start = analysis::resolve_callable_selector(&graph, &start)?;
+                QueryResult::Reachable(query_entities(&graph, analysis::reachable(&graph, &start)?))
+            }
             Query::ShortestPath { start, end } => {
-                QueryResult::ShortestPath(analysis::shortest_path(
-                    &graph,
-                    &analysis::resolve(&graph, &start)?,
-                    &analysis::resolve(&graph, &end)?,
-                )?)
+                let start = analysis::resolve_callable_selector(&graph, &start)?;
+                let end = analysis::resolve_callable_selector(&graph, &end)?;
+                QueryResult::ShortestPath(
+                    analysis::shortest_path(&graph, &start, &end)?
+                        .map(|path| query_entities(&graph, path)),
+                )
             }
         })
     }
@@ -171,6 +199,22 @@ impl Application {
     pub fn render_viewer(&self, document: &Document) -> Result<String, String> {
         viewer::render_html(document)
     }
+}
+
+fn query_entities(graph: &Graph, entity_ids: Vec<String>) -> Vec<QueryEntity> {
+    entity_ids
+        .into_iter()
+        .map(|entity_id| {
+            let node = graph
+                .nodes
+                .get(&entity_id)
+                .expect("analysis results must name graph entities");
+            QueryEntity {
+                entity_id,
+                display_name: node.label.clone(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -194,7 +238,6 @@ mod tests {
         let document = application
             .build(&[PathBuf::from("tests/fixtures/simple.ll")], "clang", &[])
             .unwrap();
-
         let json = application.export_json(&document).unwrap();
         assert!(json.ends_with('\n'));
         let loaded = application.load_json(&json).unwrap();
@@ -209,6 +252,17 @@ mod tests {
         let document = application
             .build(&[PathBuf::from("tests/fixtures/simple.ll")], "clang", &[])
             .unwrap();
+        let query_entity = |display_name: &str| {
+            let node = document
+                .nodes
+                .iter()
+                .find(|node| node.label == display_name)
+                .unwrap();
+            serde_json::json!({
+                "entity_id": node.id,
+                "display_name": node.label,
+            })
+        };
 
         assert_eq!(
             serde_json::to_value(
@@ -217,7 +271,7 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!([["step"]])
+            serde_json::json!([[query_entity("step")]])
         );
         assert_eq!(
             serde_json::to_value(
@@ -231,7 +285,7 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!(["puts", "step"])
+            serde_json::json!([query_entity("puts"), query_entity("step")])
         );
         assert_eq!(
             serde_json::to_value(
@@ -246,7 +300,11 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!(["main", "step", "puts"])
+            serde_json::json!([
+                query_entity("main"),
+                query_entity("step"),
+                query_entity("puts")
+            ])
         );
         assert_eq!(
             serde_json::to_value(application.query(document, Query::Summary).unwrap()).unwrap()["node_count"],

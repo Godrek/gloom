@@ -2,10 +2,10 @@ use gloom::app::Application;
 use gloom::{
     CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CallableIdentityScope, ContributedCallKind,
     ContributedCallSite, ContributedCallable, ContributedEvidence, ContributedEvidenceLocation,
-    ContributedInput, ContributedTargetClaim, ContributorCallSiteId, ContributorIdentity,
-    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
-    EvidenceContributor, EvidenceScope, EvidenceSupport, Manifestation, ObservationContext,
-    ProgramEntityKind, PublishedSnapshot, Resolution,
+    ContributedInput, ContributedTargetClaim, ContributorCallSiteId, ContributorCallableIdentity,
+    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
+    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, Manifestation,
+    ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,10 @@ fn evidence(
             line,
         },
     }
+}
+
+fn callable_identity(value: &str) -> ContributorCallableIdentity {
+    ContributorCallableIdentity::new(value, CallableIdentityScope::LinkageNamespace).unwrap()
 }
 
 /// One observation context of the fixture input, with the representation and
@@ -95,8 +99,7 @@ fn observed_contexts(publication: &ObservationContext) -> Vec<ObservedContext> {
 
 fn shared_target(observed: &ObservedContext, line: usize, artifact: &str) -> ContributedCallable {
     ContributedCallable {
-        contributor_callable_id: "shared_target".into(),
-        identity_scope: CallableIdentityScope::LinkedProgram,
+        callable_identity: callable_identity("shared_target"),
         display_name: "shared_target".into(),
         defined: true,
         representation: observed.representation.into(),
@@ -118,8 +121,7 @@ fn fixture_input(input: &Path, fingerprint: &str) -> ContributedInput {
 
 fn dispatch(observed: &ObservedContext, artifact: &str) -> ContributedCallable {
     ContributedCallable {
-        contributor_callable_id: "dispatch".into(),
-        identity_scope: CallableIdentityScope::LinkedProgram,
+        callable_identity: callable_identity("dispatch"),
         display_name: "dispatch".into(),
         defined: true,
         representation: observed.representation.into(),
@@ -177,7 +179,7 @@ impl EvidenceContributor for SharedTargetFixture {
             call_sites: vec![ContributedCallSite {
                 contributor_call_site_id: ContributorCallSiteId::new("dispatch:9").unwrap(),
                 kind: ContributedCallKind::Indirect,
-                caller_callable_id: "dispatch".into(),
+                caller_callable_identity: callable_identity("dispatch"),
                 line: 9,
                 observation_context_id: observed[0].context.id.clone(),
                 resolution: Resolution::Partial,
@@ -191,8 +193,7 @@ impl EvidenceContributor for SharedTargetFixture {
                 target_claims: observed
                     .iter()
                     .map(|observed| ContributedTargetClaim {
-                        target_callable_id: "shared_target".into(),
-                        target_identity_scope: CallableIdentityScope::LinkedProgram,
+                        target_callable_identity: callable_identity("shared_target"),
                         callee_display_name: "shared_target".into(),
                         target_representation: observed.representation.into(),
                         observation_context_id: observed.context.id.clone(),
@@ -276,7 +277,9 @@ fn shared_target_manifestations(snapshot: &PublishedSnapshot) -> Vec<&Manifestat
     snapshot
         .manifestations()
         .iter()
-        .filter(|manifestation| manifestation.contributor_callable_id == "shared_target")
+        .filter(|manifestation| {
+            manifestation.contributor_callable_identity.as_str() == "shared_target"
+        })
         .collect()
 }
 
@@ -289,7 +292,10 @@ fn correspondence_claims_cite_only_contributor_identity_evidence() {
     assert_eq!(snapshot.correspondence_claims().len(), 1);
     let claim = &snapshot.correspondence_claims()[0];
     assert_eq!(claim.rule, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE);
-    assert_eq!(claim.contributor_callable_id, "shared_target");
+    assert_eq!(
+        claim.contributor_callable_identity.as_str(),
+        "shared_target"
+    );
     assert_eq!(
         claim.manifestation_ids.iter().collect::<BTreeSet<_>>(),
         manifestations
@@ -636,7 +642,8 @@ fn identity_evidence_id_for(snapshot: &PublishedSnapshot, contributor_callable_i
                 && record.related_manifestation_ids.iter().any(|id| {
                     snapshot.manifestations().iter().any(|manifestation| {
                         manifestation.id == *id
-                            && manifestation.contributor_callable_id == contributor_callable_id
+                            && manifestation.contributor_callable_identity.as_str()
+                                == contributor_callable_id
                     })
                 })
         })
