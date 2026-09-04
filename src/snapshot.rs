@@ -492,7 +492,16 @@ pub struct NamedQueryResult {
     pub call_sites: Vec<ProjectedCallSite>,
 }
 
+/// An immutable program snapshot made available for queries.
+///
+/// A published snapshot is coherent by construction: the only ways to obtain
+/// one are publishing evidence contributions and deserializing an export, and
+/// both run `validate` before the value exists. The fields are private and
+/// there is no public constructor, so no safe code outside this crate can hold
+/// a snapshot whose invariants were never checked, and a republished export
+/// cannot smuggle in knowledge the core never derived.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "wire::PublishedSnapshot")]
 pub struct PublishedSnapshot {
     schema_version: String,
     program_snapshot: ProgramSnapshot,
@@ -506,6 +515,78 @@ pub struct PublishedSnapshot {
     correspondence_claims: Vec<CorrespondenceClaim>,
     derivations: Vec<Derivation>,
     call_graph_projection: CallGraphProjection,
+}
+
+/// The wire form an export is read back in, before anything has checked that
+/// it is coherent.
+///
+/// Deserializing a [`PublishedSnapshot`] goes through this private module so
+/// that reading an export and accepting it stay one step: a document that
+/// `validate` rejects never becomes a published snapshot, and the failure
+/// carries the message the loader reports. The stand-in carries the name of
+/// the type it stands in for, so a document of the wrong shape is still
+/// reported against `PublishedSnapshot`.
+mod wire {
+    use super::{
+        AcquiredInput, CallGraphProjection, CallSiteResolution, CorrespondenceClaim, Derivation,
+        EvidenceRecord, Manifestation, ObservationContext, ProgramEntity, ProgramSnapshot,
+        TargetClaim,
+    };
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct PublishedSnapshot {
+        pub(super) schema_version: String,
+        pub(super) program_snapshot: ProgramSnapshot,
+        pub(super) acquired_inputs: Vec<AcquiredInput>,
+        pub(super) observation_contexts: Vec<ObservationContext>,
+        pub(super) program_entities: Vec<ProgramEntity>,
+        pub(super) manifestations: Vec<Manifestation>,
+        pub(super) evidence_records: Vec<EvidenceRecord>,
+        pub(super) call_site_resolutions: Vec<CallSiteResolution>,
+        pub(super) target_claims: Vec<TargetClaim>,
+        pub(super) correspondence_claims: Vec<CorrespondenceClaim>,
+        pub(super) derivations: Vec<Derivation>,
+        pub(super) call_graph_projection: CallGraphProjection,
+    }
+}
+
+impl TryFrom<wire::PublishedSnapshot> for PublishedSnapshot {
+    type Error = String;
+
+    fn try_from(document: wire::PublishedSnapshot) -> Result<Self, Self::Error> {
+        let snapshot = Self {
+            schema_version: document.schema_version,
+            program_snapshot: document.program_snapshot,
+            acquired_inputs: document.acquired_inputs,
+            observation_contexts: document.observation_contexts,
+            program_entities: document.program_entities,
+            manifestations: document.manifestations,
+            evidence_records: document.evidence_records,
+            call_site_resolutions: document.call_site_resolutions,
+            target_claims: document.target_claims,
+            correspondence_claims: document.correspondence_claims,
+            derivations: document.derivations,
+            call_graph_projection: document.call_graph_projection,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+}
+
+/// Reads a published snapshot back from an exported document.
+///
+/// Loading and deserializing enforce exactly the same invariants; loading only
+/// finishes reading the document first. It takes the wire form, insists the
+/// text held nothing but that one document, and converts afterwards, so a
+/// malformed export is reported as the malformed text it is instead of being
+/// preempted by the first invariant its content happens to break.
+pub(crate) fn load_json(text: &str) -> Result<PublishedSnapshot, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let document = wire::PublishedSnapshot::deserialize(&mut deserializer)
+        .map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
+    PublishedSnapshot::try_from(document)
 }
 
 /// The contributor-identity evidence a snapshot publishes for one contributor
@@ -756,7 +837,7 @@ impl PublishedSnapshot {
         Ok(groups)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         if self.schema_version != SNAPSHOT_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported snapshot schema {:?}",
