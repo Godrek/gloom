@@ -65,7 +65,7 @@ The acquired input an evidence record was read from and the location within that
 _Avoid_: Source line, evidence origin
 
 **Declared callable**:
-A callable manifestation an evidence source asserted for itself, evidenced by contributor-identity evidence read where the source declares it. A direct target claim may name only a declared callable, so a manifestation that exists because a claim named it is not one.
+A callable manifestation an evidence contributor asserts it read a declaration for in an acquired input, evidenced by contributor-identity evidence located at that declaration. A direct target claim may name only a declared callable, so a manifestation that exists because a claim named it is not one.
 _Avoid_: Known function, resolved callee
 
 **Contributor callable identity**:

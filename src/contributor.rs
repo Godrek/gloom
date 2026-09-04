@@ -35,10 +35,45 @@ use std::path::Path;
 ///   callable the contribution also declares: the target manifestation carries
 ///   contributor-identity evidence from the same acquired input and observation
 ///   context, and its representation is one of
-///   [`crate::snapshot::DECLARED_CALLABLE_REPRESENTATIONS`]. A contributor that
+///   [`DECLARED_CALLABLE_REPRESENTATIONS`]. A contributor that
 ///   reaches a callable only through a target claim, as an external `declare`
 ///   or an alias once did, must contribute it as a callable instead.
 pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "6";
+
+/// The target-evidence type that says a call instruction names its callee
+/// outright, rather than that the callee was observed among a call site's
+/// possible targets.
+///
+/// A direct call is a statement about the module's own text: the instruction
+/// spells out a callable the evidence source declared. So it carries an
+/// obligation no other target evidence does — the declaration must be in the
+/// snapshot too, as contributor-identity evidence for the manifestation the
+/// claim names. Evidence of any other type asserts only that a target was
+/// observed among a call site's possible callees, and may name a manifestation
+/// the claim itself introduced.
+pub(crate) const STATIC_DIRECT_CALL_EVIDENCE_TYPE: &str = "static-direct-call";
+
+/// How a module writes a callable global, and so the manifestation
+/// representations a contributor may give a static direct-call target.
+///
+/// A direct call reaches a callable the module declares, defines, or aliases;
+/// every other global an instruction can name — a global variable, an alias to
+/// data — is not callable, and a claim naming one is a claim the module does
+/// not make. The vocabulary belongs to this contract rather than to the core
+/// model, which is where toolchain-specific coupling is meant to live: a
+/// contributor for another toolchain adds its own declaration kinds here, at a
+/// new contract version, rather than asserting a kind nothing agreed on.
+pub(crate) const LLVM_FUNCTION_REPRESENTATION: &str = "llvm-function";
+pub(crate) const LLVM_ALIAS_REPRESENTATION: &str = "llvm-alias";
+pub(crate) const LLVM_IFUNC_REPRESENTATION: &str = "llvm-ifunc";
+
+/// The declaration kinds this contract admits, in one place, for the
+/// contributors that assert them and the validation that checks them.
+pub(crate) const DECLARED_CALLABLE_REPRESENTATIONS: [&str; 3] = [
+    LLVM_FUNCTION_REPRESENTATION,
+    LLVM_ALIAS_REPRESENTATION,
+    LLVM_IFUNC_REPRESENTATION,
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {

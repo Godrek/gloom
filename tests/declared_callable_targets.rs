@@ -304,11 +304,13 @@ fn aliases_and_ifuncs_are_declared_callables_of_their_own_kind() {
     );
 }
 
-/// An alias the module writes over data, around a cycle, or through an
-/// expression the parse cannot follow is no callable, so it is declared as
-/// none: the new rule closes a hole without inventing callables to fill it.
+/// The contributor declares only the callables its evidence establishes. An
+/// alias to data reaches no function and is no callable; an alias written
+/// through an expression the parse does not follow may well be one, but this
+/// evidence does not say so, and a callable is not declared on a guess. Either
+/// way the new rule closes a hole without inventing callables to fill it.
 #[test]
-fn aliases_that_reach_no_function_are_declared_as_no_callable() {
+fn aliases_the_evidence_does_not_establish_as_callable_are_declared_as_none() {
     for (fixture, build_target, expected) in [
         (
             "tests/fixtures/data-alias-callee.ll",
