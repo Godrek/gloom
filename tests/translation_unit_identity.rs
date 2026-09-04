@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 const FIRST_UNIT: &str = "tests/fixtures/local-shadow-first.ll";
 const SECOND_UNIT: &str = "tests/fixtures/local-shadow-second.ll";
+const LINKAGE_PREFIXES: &str = "tests/fixtures/linkage-prefixes.ll";
 
 fn context(build_target: &str) -> ObservationContext {
     ObservationContext::static_analysis(
@@ -453,5 +454,47 @@ fn an_input_scoped_callable_identity_may_not_span_acquired_inputs() {
     assert!(
         repeated.contains("is scoped to acquired input"),
         "unexpected error: {repeated}"
+    );
+}
+
+/// The linkage keyword decides the identity scope wherever the LangRef allows
+/// it to sit, and nowhere else. `linkage-prefixes.ll` writes a linkage keyword
+/// beside a preemption specifier, a visibility, a calling convention, return
+/// attributes, `unnamed_addr`, a `comdat`, a literal struct return type, an
+/// alias, and an ifunc; it also names a callable `@"quoted internal"`, whose
+/// spelling contains a linkage keyword that is not one. The expectations below
+/// are the object file's own symbol table: `t` and `i` for every local global,
+/// `T` and `W` for every exported one, and no symbol at all for the `private`
+/// one.
+#[test]
+fn linkage_decides_identity_scope_wherever_the_keyword_may_sit() {
+    let snapshot = publish_units("linkage-prefixes", &[LINKAGE_PREFIXES]).unwrap();
+
+    let scopes = snapshot
+        .manifestations()
+        .iter()
+        .map(|manifestation| {
+            let entity = snapshot
+                .program_entities()
+                .iter()
+                .find(|entity| entity.id == manifestation.entity_id)
+                .unwrap();
+            (entity.display_name.as_str(), manifestation.identity_scope)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        scopes,
+        [
+            ("tricky_local", CallableIdentityScope::AcquiredInput),
+            ("struct_local", CallableIdentityScope::AcquiredInput),
+            ("exported_odr", CallableIdentityScope::LinkedProgram),
+            ("quoted internal", CallableIdentityScope::AcquiredInput),
+            ("alias_local", CallableIdentityScope::AcquiredInput),
+            ("alias_public", CallableIdentityScope::LinkedProgram),
+            ("ifunc_local", CallableIdentityScope::AcquiredInput),
+            ("resolver", CallableIdentityScope::AcquiredInput),
+            ("user", CallableIdentityScope::LinkedProgram),
+        ]
     );
 }
