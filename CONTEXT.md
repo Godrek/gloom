@@ -64,6 +64,10 @@ _Avoid_: Evidence role, edge weight
 The acquired input an evidence record was read from and the location within that input's evidence artifact. Provenance belongs to the evidence record itself rather than to the entity it supports, so runtime evidence about a statically observed call site keeps the trace's artifact and line.
 _Avoid_: Source line, evidence origin
 
+**Declared callable**:
+A callable manifestation an evidence contributor asserts it read a declaration for in an acquired input, evidenced by contributor-identity evidence located at that declaration. A direct target claim may name only a declared callable, so a manifestation that exists because a claim named it is not one.
+_Avoid_: Known function, resolved callee
+
 **Contributor callable identity**:
 The identity an evidence contributor asserts for a callable within one observation context. It is the contributor's claim of sameness across its own contexts and is distinct from a display name.
 _Avoid_: Symbol name, function name
