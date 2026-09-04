@@ -3,8 +3,8 @@ use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
 use crate::snapshot::{
-    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, ProgramEntityId,
-    PublishedSnapshot,
+    CallableSearchResult, Explanation, ExplanationHandle, NamedQueryResult, ObservationContext,
+    ProgramEntityId, PublishedSnapshot,
 };
 use crate::viewer;
 use serde::Serialize;
@@ -27,6 +27,18 @@ pub enum NamedQuery {
         caller_name: String,
         caller_entity_id: Option<ProgramEntityId>,
     },
+}
+
+/// The named query that finds callable entities by label.
+///
+/// It answers with entity identities and the acquired input and declaration
+/// behind each one, so a user who knows only a name can pick the callable they
+/// meant before naming it to another query. It keeps its own entry point
+/// because its result is a different projection from a caller's outgoing
+/// calls; issue #8 owns the full named-query surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableSearch {
+    pub label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +76,14 @@ impl Application {
                 caller_entity_id,
             } => snapshot.query_callees(&caller_name, caller_entity_id.as_ref()),
         }
+    }
+
+    pub fn search_snapshot_callables(
+        &self,
+        snapshot: &PublishedSnapshot,
+        query: CallableSearch,
+    ) -> Result<CallableSearchResult, String> {
+        Ok(snapshot.search_callables(&query.label))
     }
 
     pub fn explain_snapshot(

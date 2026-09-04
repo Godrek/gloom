@@ -503,6 +503,57 @@ pub struct Explanation {
     pub derivations: Vec<Derivation>,
 }
 
+/// Where an evidence contributor read the declaration a callable manifestation
+/// was asserted from.
+///
+/// A callable entity carries no source location, because its evidence does not
+/// preserve one for the entity itself; the contributor-identity evidence that
+/// declared one of its manifestations does, and that is what a searcher needs
+/// to tell two callables spelled the same way apart.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CallableDeclaration {
+    pub evidence_id: EvidenceId,
+    pub source_location: SourceLocation,
+}
+
+/// One manifestation of a matched callable, with the acquired input it was read
+/// from and the declaration it was read at.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchedCallableManifestation {
+    pub manifestation_id: ManifestationId,
+    pub contributor_callable_id: String,
+    pub identity_scope: CallableIdentityScope,
+    pub acquired_input_id: AcquiredInputId,
+    pub acquired_input_path: String,
+    pub observation_context_id: ObservationContextId,
+    pub representation: String,
+    pub defined: bool,
+    /// Absent for a manifestation no contribution declared, one a target claim
+    /// introduced by naming it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<CallableDeclaration>,
+}
+
+/// One callable a search matched.
+///
+/// The label is what matched; the identity is `entity_id`, and the
+/// manifestations are what tell this callable from another the search matched
+/// under the same label.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchedCallable {
+    pub entity_id: ProgramEntityId,
+    pub display_name: String,
+    pub manifestations: Vec<SearchedCallableManifestation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CallableSearchResult {
+    pub query_name: String,
+    pub program_snapshot_id: ProgramSnapshotId,
+    pub label: String,
+    pub callables: Vec<SearchedCallable>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NamedQueryResult {
     pub query_name: String,
@@ -665,6 +716,115 @@ impl PublishedSnapshot {
         &self.call_graph_projection
     }
 
+    /// Finds the callable entities whose display name contains `label`.
+    ///
+    /// A display name is a label, not an identity, so a search matches labels
+    /// and answers with identities: every match carries its entity identity and
+    /// one entry per manifestation naming the acquired input it was read from
+    /// and the declaration it was read at. That is what lets a user choose
+    /// between two translation-unit-local callables spelled the same way. A
+    /// search that matches nothing is an empty result, not an error: absence in
+    /// an open-world projection means only that nothing matched.
+    pub(crate) fn search_callables(&self, label: &str) -> CallableSearchResult {
+        CallableSearchResult {
+            query_name: "callable-search".into(),
+            program_snapshot_id: self.program_snapshot.id.clone(),
+            label: label.into(),
+            callables: self
+                .program_entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == ProgramEntityKind::Callable
+                        && entity.display_name.contains(label)
+                })
+                .map(|entity| self.searched_callable(entity))
+                .collect(),
+        }
+    }
+
+    fn searched_callable(&self, entity: &ProgramEntity) -> SearchedCallable {
+        SearchedCallable {
+            entity_id: entity.id.clone(),
+            display_name: entity.display_name.clone(),
+            manifestations: self
+                .manifestations
+                .iter()
+                .filter(|manifestation| manifestation.entity_id == entity.id)
+                .map(|manifestation| {
+                    let acquired_input = self
+                        .acquired_inputs
+                        .iter()
+                        .find(|input| input.id == manifestation.acquired_input_id)
+                        .expect("validated manifestation must name an acquired input");
+                    SearchedCallableManifestation {
+                        manifestation_id: manifestation.id.clone(),
+                        contributor_callable_id: manifestation.contributor_callable_id.clone(),
+                        identity_scope: manifestation.identity_scope,
+                        acquired_input_id: manifestation.acquired_input_id.clone(),
+                        acquired_input_path: acquired_input.path.clone(),
+                        observation_context_id: manifestation.observation_context_id.clone(),
+                        representation: manifestation.representation.clone(),
+                        defined: manifestation.defined,
+                        declaration: self.callable_declaration(&manifestation.id),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn callable_declaration(
+        &self,
+        manifestation_id: &ManifestationId,
+    ) -> Option<CallableDeclaration> {
+        self.evidence_records
+            .iter()
+            .find(|evidence| {
+                evidence.support == EvidenceSupport::ContributorIdentity
+                    && evidence
+                        .related_manifestation_ids
+                        .contains(manifestation_id)
+            })
+            .map(|evidence| CallableDeclaration {
+                evidence_id: evidence.id.clone(),
+                source_location: evidence.source_location.clone(),
+            })
+    }
+
+    /// How one ambiguous candidate is offered to a user: its identity, the
+    /// acquired input it was read from, and where it was declared. Two
+    /// callables spelled the same way are told apart here rather than by
+    /// asking the user to guess from bare identities.
+    fn callable_selection_hint(&self, entity: &ProgramEntity) -> String {
+        let described = self
+            .searched_callable(entity)
+            .manifestations
+            .into_iter()
+            .map(|manifestation| match manifestation.declaration {
+                // The evidence artifact is the acquired input's own path for a
+                // textual input and a generated artifact for a compiled one, so
+                // it is named only when it says something the path does not.
+                Some(declaration)
+                    if declaration.source_location.artifact
+                        == manifestation.acquired_input_path =>
+                {
+                    format!(
+                        "declared at {}:{}",
+                        manifestation.acquired_input_path, declaration.source_location.line
+                    )
+                }
+                Some(declaration) => format!(
+                    "acquired from {}, declared at {}:{}",
+                    manifestation.acquired_input_path,
+                    declaration.source_location.artifact,
+                    declaration.source_location.line
+                ),
+                None => format!("acquired from {}", manifestation.acquired_input_path),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{} ({described})", entity.id)
+    }
+
     pub(crate) fn query_callees(
         &self,
         caller_name: &str,
@@ -695,7 +855,7 @@ impl PublishedSnapshot {
         } else {
             let candidate_ids = candidates
                 .iter()
-                .map(|candidate| candidate.id.as_str())
+                .map(|candidate| self.callable_selection_hint(candidate))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(

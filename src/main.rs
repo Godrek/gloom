@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use gloom::app::{Application, NamedQuery, Query};
+use gloom::app::{Application, CallableSearch, NamedQuery, Query};
 use gloom::{LlvmTextContributor, ObservationContext};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,11 +72,28 @@ enum Commands {
     /// Run a named query or expand an explanation from a published snapshot.
     QuerySnapshot {
         snapshot: PathBuf,
-        #[arg(long, conflicts_with = "explain", required_unless_present = "explain")]
+        /// Find callable entities whose display name contains LABEL, with the
+        /// acquired input and declaration that tell same-named callables apart.
+        #[arg(
+            long,
+            value_name = "LABEL",
+            conflicts_with_all = ["callees", "explain"],
+            required_unless_present_any = ["callees", "explain"]
+        )]
+        search_callables: Option<String>,
+        #[arg(
+            long,
+            conflicts_with_all = ["explain", "search_callables"],
+            required_unless_present_any = ["explain", "search_callables"]
+        )]
         callees: Option<String>,
-        #[arg(long, requires = "callees", conflicts_with = "explain")]
+        #[arg(long, requires = "callees", conflicts_with_all = ["explain", "search_callables"])]
         caller_entity_id: Option<String>,
-        #[arg(long, conflicts_with = "callees", required_unless_present = "callees")]
+        #[arg(
+            long,
+            conflicts_with_all = ["callees", "search_callables"],
+            required_unless_present_any = ["callees", "search_callables"]
+        )]
         explain: Option<String>,
     },
     /// Render a published snapshot as a self-contained evidence viewer.
@@ -189,6 +206,7 @@ fn run() -> Result<(), String> {
         }
         Commands::QuerySnapshot {
             snapshot,
+            search_callables,
             callees,
             caller_entity_id,
             explain,
@@ -196,7 +214,11 @@ fn run() -> Result<(), String> {
             let published = application
                 .load_snapshot_json(&read(&snapshot)?)
                 .map_err(|error| format!("{}: {error}", snapshot.display()))?;
-            let value = if let Some(caller_name) = callees {
+            let value = if let Some(label) = search_callables {
+                serde_json::to_value(
+                    application.search_snapshot_callables(&published, CallableSearch { label })?,
+                )
+            } else if let Some(caller_name) = callees {
                 let caller_entity_id = caller_entity_id
                     .map(|requested_id| {
                         published
@@ -224,7 +246,7 @@ fn run() -> Result<(), String> {
                     .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
                 serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
             } else {
-                unreachable!("clap requires either --callees or --explain")
+                unreachable!("clap requires --search-callables, --callees, or --explain")
             }
             .map_err(|error| error.to_string())?;
             println!(
