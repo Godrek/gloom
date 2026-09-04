@@ -388,6 +388,39 @@ pub struct TargetClaim {
 /// the target, without any core-side inference.
 pub const CONTRIBUTED_EVIDENCE_TARGET_RULE: &str = "call-target-from-contributed-evidence";
 
+/// The target-evidence type that says a call instruction names its callee
+/// outright, rather than that the callee was observed among a call site's
+/// possible targets.
+///
+/// A direct call is a statement about the module's own text: the instruction
+/// spells out a callable the evidence source declared. So it carries an
+/// obligation no other target evidence does — the declaration must be in the
+/// snapshot too, as contributor-identity evidence for the manifestation the
+/// claim names.
+pub const STATIC_DIRECT_CALL_EVIDENCE_TYPE: &str = "static-direct-call";
+
+/// How a module writes a callable global, and so the manifestation
+/// representations a static direct-target claim may name.
+///
+/// A direct call reaches a callable the module declares, defines, or aliases;
+/// every other global an instruction can name — a global variable, an alias to
+/// data — is not callable, and a claim naming one is a claim the module does
+/// not make. The core keeps the list because it is the core that decides what
+/// counts as a directly callable declaration; contributors supply the kinds,
+/// and a contributor for another toolchain extends the list here rather than
+/// asserting a kind of its own invention.
+pub const LLVM_FUNCTION_REPRESENTATION: &str = "llvm-function";
+pub const LLVM_ALIAS_REPRESENTATION: &str = "llvm-alias";
+pub const LLVM_IFUNC_REPRESENTATION: &str = "llvm-ifunc";
+
+/// The declared-callable representations, in one place, for the rule that
+/// checks them and the contributors that assert them.
+pub const DECLARED_CALLABLE_REPRESENTATIONS: [&str; 3] = [
+    LLVM_FUNCTION_REPRESENTATION,
+    LLVM_ALIAS_REPRESENTATION,
+    LLVM_IFUNC_REPRESENTATION,
+];
+
 /// The only correspondence rule the core currently derives. A contributor
 /// asserts one contributor callable identity for a callable in each of its
 /// observation contexts; when that identity appears in more than one context

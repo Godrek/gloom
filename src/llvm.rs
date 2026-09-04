@@ -6,7 +6,9 @@ use crate::contributor::{
 };
 use crate::model::{Graph, Node};
 use crate::snapshot::{
-    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, Resolution,
+    CompletenessBasis, EvidenceScope, EvidenceSupport, LLVM_ALIAS_REPRESENTATION,
+    LLVM_FUNCTION_REPRESENTATION, LLVM_IFUNC_REPRESENTATION, ObservationContext, Resolution,
+    STATIC_DIRECT_CALL_EVIDENCE_TYPE,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,18 +27,25 @@ struct AcquiredLlvmIr {
     pub kind: AcquiredInputKind,
 }
 
+/// A callable global the module declares: a `define`, a `declare`, or an
+/// alias or ifunc whose chain reaches one. Every one of them is contributed as
+/// a callable manifestation with its own contributor-identity evidence, read
+/// at the line that declares it, so a direct target claim naming it rests on
+/// the declaration rather than introducing the callable itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedFunction {
     pub name: String,
     pub defined: bool,
     pub line: usize,
+    pub representation: &'static str,
 }
 
 /// How a callable global is written in the module, kept as the representation
-/// of the manifestation contributed for it.
-const LLVM_FUNCTION: &str = "llvm-function";
-const LLVM_ALIAS: &str = "llvm-alias";
-const LLVM_IFUNC: &str = "llvm-ifunc";
+/// of the manifestation contributed for it. The core owns the vocabulary,
+/// since it is what a direct target claim is checked against on load.
+const LLVM_FUNCTION: &str = LLVM_FUNCTION_REPRESENTATION;
+const LLVM_ALIAS: &str = LLVM_ALIAS_REPRESENTATION;
+const LLVM_IFUNC: &str = LLVM_IFUNC_REPRESENTATION;
 
 /// A callee named by a call site, with the kind of callable global it
 /// resolved to.
@@ -138,9 +147,9 @@ impl EvidenceContributor for LlvmTextContributor {
                 .into_iter()
                 .map(|function| ContributedCallable {
                     contributor_callable_id: function.name.clone(),
-                    display_name: function.name,
+                    display_name: function.name.clone(),
                     defined: function.defined,
-                    representation: LLVM_FUNCTION.into(),
+                    representation: function.representation.into(),
                     observation_context_id: context.id.clone(),
                     line: function.line,
                     identity_evidence: ContributedEvidence {
@@ -199,7 +208,7 @@ impl EvidenceContributor for LlvmTextContributor {
                                 target_representation: callee.representation.into(),
                                 observation_context_id: context.id.clone(),
                                 evidence: vec![ContributedEvidence {
-                                    evidence_type: "static-direct-call".into(),
+                                    evidence_type: STATIC_DIRECT_CALL_EVIDENCE_TYPE.into(),
                                     scope: EvidenceScope::Static,
                                     support: EvidenceSupport::TargetClaim,
                                     completeness_basis: None,
@@ -924,10 +933,22 @@ fn callable_representation(
     }
 }
 
+/// A callable global read during the token walk, before the module's
+/// declarations are complete.
+///
+/// A `define` or `declare` is callable on sight, but whether an alias or an
+/// ifunc is depends on globals the module may declare further down, so it is
+/// staged with the line that declares it and resolved once the walk is over.
+enum PendingGlobal {
+    Function(ObservedFunction),
+    Aliased { name: String, line: usize },
+}
+
 fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     let tokens = tokenize_llvm_ir(text)?;
     let mut observations = LlvmObservations::default();
     let mut declarations: BTreeMap<String, DeclaredGlobal> = BTreeMap::new();
+    let mut pending_globals: Vec<PendingGlobal> = Vec::new();
     let mut pending_calls: Vec<PendingCall> = Vec::new();
     let mut current = None;
     let mut body_end = 0_usize;
@@ -935,7 +956,12 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     while index < tokens.len() {
         if current.is_none() {
             if let Some((name, declaration)) = declared_alias(&tokens, index) {
-                declarations.insert(name.to_owned(), declaration);
+                let name = name.to_owned();
+                pending_globals.push(PendingGlobal::Aliased {
+                    name: name.clone(),
+                    line: tokens[index].line,
+                });
+                declarations.insert(name, declaration);
                 index += 1;
                 continue;
             }
@@ -959,11 +985,12 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
                 unreachable!()
             };
             declarations.insert(name.clone(), DeclaredGlobal::Function);
-            observations.functions.push(ObservedFunction {
+            pending_globals.push(PendingGlobal::Function(ObservedFunction {
                 name: name.clone(),
                 defined,
                 line: tokens[index].line,
-            });
+                representation: LLVM_FUNCTION,
+            }));
             let signature_end = function_signature_end(&tokens, name_index).ok_or_else(|| {
                 format!("LLVM function '{name}' has an incomplete parameter list")
             })?;
@@ -990,6 +1017,41 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
             });
         }
         index += 1;
+    }
+
+    // An alias or ifunc is contributed as a callable of its own kind, in the
+    // order the module writes it, but only once the whole module is observed:
+    // it is callable only when its chain of aliasees reaches a function or an
+    // ifunc, and the aliasee may be declared further down. An alias to data,
+    // to an undeclared global, or around a cycle is no callable and is
+    // contributed as none. A name a `define` or `declare` already introduced
+    // stays that function: LLVM rejects a module that spells one global twice,
+    // and a contributor must not assert one callable identity twice either.
+    let function_names = pending_globals
+        .iter()
+        .filter_map(|global| match global {
+            PendingGlobal::Function(function) => Some(function.name.as_str()),
+            PendingGlobal::Aliased { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut aliased_names = BTreeSet::new();
+    for global in &pending_globals {
+        match global {
+            PendingGlobal::Function(function) => observations.functions.push(function.clone()),
+            PendingGlobal::Aliased { name, line } => {
+                if function_names.contains(name.as_str()) || !aliased_names.insert(name.as_str()) {
+                    continue;
+                }
+                if let Some(representation) = callable_representation(name, &declarations) {
+                    observations.functions.push(ObservedFunction {
+                        name: name.clone(),
+                        defined: false,
+                        line: *line,
+                        representation,
+                    });
+                }
+            }
+        }
     }
 
     // Callee operands are resolved after the whole module has been observed:
