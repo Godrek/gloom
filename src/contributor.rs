@@ -31,7 +31,14 @@ use std::path::Path;
 /// - `5`: call-site-resolution evidence may carry a completeness basis, and a
 ///   complete target-set resolution requires one, so a contributor declares the
 ///   boundary it closed over instead of asserting completeness on its own.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "5";
+/// - `6`: a target claim supported by `static-direct-call` evidence names a
+///   callable the contribution also declares: the target manifestation carries
+///   contributor-identity evidence from the same acquired input and observation
+///   context, and its representation is one of
+///   [`crate::snapshot::DECLARED_CALLABLE_REPRESENTATIONS`]. A contributor that
+///   reaches a callable only through a target claim, as an external `declare`
+///   or an alias once did, must contribute it as a callable instead.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "6";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributorIdentity {

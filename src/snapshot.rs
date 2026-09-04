@@ -1585,6 +1585,25 @@ impl PublishedSnapshot {
                 }
             }
         }
+        // The manifestations an evidence source declared as callables of its
+        // own, keyed by the acquired input and observation context the
+        // declaration was read in. A manifestation that exists only because a
+        // target claim named it is absent from this index, which is what lets
+        // a direct target claim be told from an invented one.
+        let declared_callables: BTreeSet<(&str, &str, &str)> = self
+            .evidence_records
+            .iter()
+            .filter(|evidence| evidence.support == EvidenceSupport::ContributorIdentity)
+            .flat_map(|evidence| {
+                evidence.related_manifestation_ids.iter().map(move |id| {
+                    (
+                        id.as_str(),
+                        evidence.acquired_input_id.as_str(),
+                        evidence.observation_context_id.as_str(),
+                    )
+                })
+            })
+            .collect();
         let claim_ids: BTreeSet<_> = self
             .target_claims
             .iter()
@@ -1631,6 +1650,7 @@ impl PublishedSnapshot {
             if claim.evidence_ids.is_empty() {
                 return Err(format!("claim '{}' has no supporting evidence", claim.id));
             }
+            let mut names_a_direct_call = false;
             for evidence_id in &claim.evidence_ids {
                 let evidence = evidence_by_id.get(evidence_id.as_str()).ok_or_else(|| {
                     format!(
@@ -1654,6 +1674,34 @@ impl PublishedSnapshot {
                     return Err(format!(
                         "claim '{}' target is not supported by evidence '{}'",
                         claim.id, evidence.id
+                    ));
+                }
+                names_a_direct_call |= evidence.evidence_type == STATIC_DIRECT_CALL_EVIDENCE_TYPE;
+            }
+            // A direct call names a callable the module itself spells out, so
+            // the snapshot has to hold the declaration as well as the claim:
+            // the target manifestation is written as one of the callable kinds
+            // and is declared by contributor-identity evidence read in the same
+            // acquired input and observation context. Target evidence of any
+            // other type asserts only that a target was observed among a call
+            // site's possible callees, which a manifestation introduced by the
+            // claim itself may legitimately be, so this obligation is the
+            // direct claim's alone.
+            if names_a_direct_call {
+                if !DECLARED_CALLABLE_REPRESENTATIONS.contains(&target.representation.as_str()) {
+                    return Err(format!(
+                        "claim '{}' names manifestation '{}' as a static direct-call target, but its representation '{}' is not a declared callable kind; a direct call names a callable global its evidence source declares",
+                        claim.id, target.id, target.representation
+                    ));
+                }
+                if !declared_callables.contains(&(
+                    target.id.as_str(),
+                    target.acquired_input_id.as_str(),
+                    claim.observation_context_id.as_str(),
+                )) {
+                    return Err(format!(
+                        "claim '{}' names manifestation '{}' as a static direct-call target, but no contributor-identity evidence declares that callable in acquired input '{}' and observation context '{}'; a direct call names a callable its evidence source declared, not one the claim itself introduced",
+                        claim.id, target.id, target.acquired_input_id, claim.observation_context_id
                     ));
                 }
             }
