@@ -701,7 +701,6 @@ fn unreferenced_call_site_resolution_evidence_is_rejected_even_without_a_basis()
 /// A call whose callee operand is a data global is not a call to a callable of
 /// that name, so it must stay unresolved and must not declare completeness.
 #[test]
-#[ignore = "requires #22 (declared-callable resolution) on main"]
 fn a_call_through_a_data_global_declares_no_completeness() {
     let application = Application;
     let context = ObservationContext::static_analysis(

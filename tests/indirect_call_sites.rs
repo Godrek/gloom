@@ -5,9 +5,9 @@ use gloom::{
     ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
     ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
     EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, ProgramEntityKind, Resolution,
+    NamedQueryResult, ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1554,5 +1554,325 @@ fn publishes_each_unresolved_indirect_call_as_a_distinct_call_site() {
             .map(|site| &site.call_site_id)
             .collect::<BTreeSet<_>>(),
         identities
+    );
+}
+
+/// Publishes one LLVM fixture through the application seam and queries one
+/// caller's callees, with each call site's source line.
+fn llvm_callee_query(
+    build_target: &str,
+    fixture: &str,
+    caller_name: &str,
+) -> (PublishedSnapshot, NamedQueryResult, Vec<usize>) {
+    let application = Application;
+    let context = ObservationContext::static_analysis(
+        format!("snapshot:{build_target}"),
+        build_target,
+        "debug fixture",
+        "textual LLVM IR",
+        "gloom.llvm-text",
+        env!("CARGO_PKG_VERSION"),
+        "llvm-ir extraction",
+    );
+    let snapshot = application
+        .publish_snapshot(
+            &[PathBuf::from(fixture)],
+            context,
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let result = application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller_name: caller_name.into(),
+                caller_entity_id: None,
+            },
+        )
+        .unwrap();
+    let lines = result
+        .call_sites
+        .iter()
+        .map(|site| {
+            snapshot
+                .program_entities()
+                .iter()
+                .find(|entity| entity.id == site.call_site_id)
+                .unwrap()
+                .source_location
+                .as_ref()
+                .unwrap()
+                .line
+        })
+        .collect();
+    (snapshot, result, lines)
+}
+
+fn resolutions(result: &NamedQueryResult) -> Vec<Resolution> {
+    result
+        .call_sites
+        .iter()
+        .map(|site| site.resolution)
+        .collect()
+}
+
+fn callable_names(snapshot: &PublishedSnapshot) -> BTreeSet<&str> {
+    snapshot
+        .program_entities()
+        .iter()
+        .filter(|entity| entity.kind == ProgramEntityKind::Callable)
+        .map(|entity| entity.display_name.as_str())
+        .collect()
+}
+
+#[test]
+fn cast_wrapped_callees_resolve_through_constant_casts() {
+    let (_, result, lines) = llvm_callee_query(
+        "cast-wrapped-callee-fixture",
+        "tests/fixtures/cast-wrapped-callee.ll",
+        "cast_wrapped_caller",
+    );
+
+    assert_eq!(
+        resolutions(&result),
+        [
+            Resolution::Complete,
+            Resolution::Complete,
+            Resolution::Absent,
+            Resolution::Complete,
+            Resolution::Absent,
+        ]
+    );
+    assert_eq!(
+        result
+            .call_sites
+            .iter()
+            .map(|site| {
+                site.targets
+                    .iter()
+                    .map(|target| target.callee_display_name.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        [
+            vec!["target"],
+            vec!["target"],
+            Vec::new(),
+            vec!["target"],
+            Vec::new(),
+        ]
+    );
+    assert_eq!(lines, [5, 6, 7, 8, 9]);
+}
+
+#[test]
+fn calls_through_a_global_variable_stay_unresolved_and_name_no_callable() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "global-variable-callee-fixture",
+        "tests/fixtures/global-variable-callee.ll",
+        "global_variable_caller",
+    );
+
+    assert_eq!(
+        resolutions(&result),
+        [Resolution::Absent, Resolution::Complete]
+    );
+    assert!(result.call_sites[0].targets.is_empty());
+    assert_eq!(lines, [5, 6]);
+    assert_eq!(result.relationships.len(), 1);
+    assert_eq!(
+        result.relationships[0].callee_display_name,
+        "declared_target"
+    );
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from(["declared_target", "global_variable_caller"])
+    );
+}
+
+#[test]
+fn calls_through_an_alias_to_data_stay_unresolved_and_name_no_callable() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "data-alias-callee-fixture",
+        "tests/fixtures/data-alias-callee.ll",
+        "data_alias_caller",
+    );
+
+    assert_eq!(
+        resolutions(&result),
+        [Resolution::Absent, Resolution::Absent]
+    );
+    assert!(result.call_sites.iter().all(|site| site.targets.is_empty()));
+    assert!(result.relationships.is_empty());
+    assert_eq!(lines, [7, 8]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from(["data_alias_caller"])
+    );
+}
+
+#[test]
+fn alias_and_ifunc_callees_resolve_as_direct_targets_of_their_own_kind() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "alias-callee-fixture",
+        "tests/fixtures/alias-callees.ll",
+        "alias_caller",
+    );
+
+    assert_eq!(resolutions(&result), [Resolution::Complete; 8]);
+    assert_eq!(
+        result
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "aliased",
+            "resolved",
+            "split",
+            "cast_aliased",
+            "partitioned",
+            "wrapped",
+            "before_module_asm",
+            "before_attributes",
+        ]
+    );
+    assert_eq!(lines, [22, 23, 24, 25, 26, 27, 28, 29]);
+
+    let exported: serde_json::Value =
+        serde_json::from_str(&Application.export_snapshot_json(&snapshot).unwrap()).unwrap();
+    let representations = exported["manifestations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|manifestation| {
+            let entity_id = manifestation["entity_id"].as_str().unwrap();
+            let display_name = exported["program_entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entity| entity["id"] == entity_id)
+                .unwrap()["display_name"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            (
+                display_name,
+                manifestation["representation"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        representations,
+        BTreeMap::from([
+            ("alias_caller".to_owned(), "llvm-function".to_owned()),
+            ("aliased".to_owned(), "llvm-alias".to_owned()),
+            ("aliasee".to_owned(), "llvm-function".to_owned()),
+            ("before_attributes".to_owned(), "llvm-alias".to_owned()),
+            ("before_module_asm".to_owned(), "llvm-alias".to_owned()),
+            ("cast_aliased".to_owned(), "llvm-alias".to_owned()),
+            ("partitioned".to_owned(), "llvm-alias".to_owned()),
+            ("resolved".to_owned(), "llvm-ifunc".to_owned()),
+            ("resolver".to_owned(), "llvm-function".to_owned()),
+            ("split".to_owned(), "llvm-alias".to_owned()),
+            ("variadic_aliasee".to_owned(), "llvm-function".to_owned()),
+            ("wrapped".to_owned(), "llvm-alias".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn calls_through_an_alias_to_an_unsupported_expression_stay_unresolved() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "select-alias-callee-fixture",
+        "tests/fixtures/select-alias-callee.ll",
+        "select_alias_caller",
+    );
+
+    assert_eq!(
+        resolutions(&result),
+        [Resolution::Absent, Resolution::Absent]
+    );
+    assert!(result.call_sites.iter().all(|site| site.targets.is_empty()));
+    assert!(result.relationships.is_empty());
+    assert_eq!(lines, [10, 11]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from(["function", "select_alias_caller"])
+    );
+}
+
+#[test]
+fn wrapped_callee_operands_resolve_to_the_function_they_wrap() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "wrapped-callee-fixture",
+        "tests/fixtures/wrapped-callees.ll",
+        "wrapped_caller",
+    );
+
+    assert_eq!(
+        resolutions(&result),
+        [
+            Resolution::Complete,
+            Resolution::Complete,
+            Resolution::Absent,
+            Resolution::Absent,
+        ]
+    );
+    assert_eq!(
+        result
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["real", "real"]
+    );
+    assert_eq!(lines, [5, 6, 7, 10]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from(["real", "wrapped_caller"])
+    );
+    assert_eq!(
+        snapshot
+            .manifestations()
+            .iter()
+            .map(|manifestation| manifestation.representation.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["llvm-function"])
+    );
+}
+
+/// A pointer type may name the address space it points into, so an alias
+/// written `alias void (), ptr addrspace(1) @target` still names its aliasee:
+/// the `addrspace` clause belongs to the aliasee's type, not to the operand
+/// that follows it.
+#[test]
+fn address_space_qualified_aliasee_types_do_not_hide_the_aliasee() {
+    let (snapshot, result, lines) = llvm_callee_query(
+        "address-space-alias-fixture",
+        "tests/fixtures/address-space-alias.ll",
+        "address_space_caller",
+    );
+
+    assert_eq!(resolutions(&result), [Resolution::Complete; 4]);
+    assert_eq!(
+        result
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["opaque_space", "typed_space", "no_space", "space_target"]
+    );
+    assert_eq!(lines, [17, 18, 19, 20]);
+    assert_eq!(
+        callable_names(&snapshot),
+        BTreeSet::from([
+            "address_space_caller",
+            "no_space",
+            "opaque_space",
+            "plain_target",
+            "space_target",
+            "typed_space",
+        ])
     );
 }
