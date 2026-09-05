@@ -345,6 +345,20 @@ fn correspondence_claims_cite_only_contributor_identity_evidence() {
             .collect::<BTreeSet<_>>(),
         claim.manifestation_ids.iter().collect::<BTreeSet<_>>()
     );
+    // One linkage-namespace identity is aggregated into one program entity only
+    // within one observation context: the namespace an identity is joined in is
+    // the context's, which names one build target. Across contexts the
+    // manifestations stay separate entities and are related by a correspondence
+    // claim, as ADR 0002 requires.
+    let entities = manifestations
+        .iter()
+        .map(|manifestation| manifestation.entity_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        entities.len(),
+        manifestations.len(),
+        "one identity must not aggregate across observation contexts"
+    );
 }
 
 #[test]

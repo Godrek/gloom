@@ -238,6 +238,16 @@ pub struct ProgramEntity {
 /// The core never parses a contributor callable identity, so a declared scope
 /// is what lets it check that an input-scoped identity never spans acquired
 /// inputs.
+///
+/// The namespace a [`Self::LinkageNamespace`] identity is joined in is the
+/// observation context's, and nothing wider: a context names one build target,
+/// so its acquired inputs are the ones contributing to that artifact, and
+/// aggregation is keyed by context and therefore never crosses one. Across
+/// contexts the manifestations stay separate entities related by a
+/// correspondence claim, as ADR 0002 requires. That the declared inputs really
+/// do contribute to the declared target is the acquisition evidence issues #2
+/// and #3 own; here it is the observation context's declaration, as every other
+/// claim bounded by that context is.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallableIdentityScope {
@@ -598,6 +608,38 @@ pub struct SearchedCallable {
     pub manifestations: Vec<SearchedCallableManifestation>,
 }
 
+/// How a named query names the callable it is about.
+///
+/// A display name is a label, so it is never required: an entity identity
+/// selects on its own, and a label selects only when it names exactly one
+/// callable. Supplying both checks them against each other.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CallableSelector {
+    pub label: Option<String>,
+    pub entity_id: Option<ProgramEntityId>,
+}
+
+impl CallableSelector {
+    pub fn by_label(label: impl Into<String>) -> Self {
+        Self {
+            label: Some(label.into()),
+            entity_id: None,
+        }
+    }
+
+    pub fn by_entity_id(entity_id: ProgramEntityId) -> Self {
+        Self {
+            label: None,
+            entity_id: Some(entity_id),
+        }
+    }
+
+    pub fn with_entity_id(mut self, entity_id: Option<ProgramEntityId>) -> Self {
+        self.entity_id = entity_id;
+        self
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CallableSearchResult {
     pub query_name: String,
@@ -924,12 +966,41 @@ impl PublishedSnapshot {
         format!("{} ({described})", entity.id)
     }
 
+    /// Resolves the callable a query is about.
+    ///
+    /// An entity identity selects on its own, because it *is* the identity: a
+    /// query that carries one never needs the label too. A label given
+    /// alongside it is checked rather than ignored, so a stale label is
+    /// reported instead of silently answering about something else. A label
+    /// alone selects only when it names exactly one callable.
     fn select_callable(
         &self,
-        display_name: &str,
-        entity_id: Option<&ProgramEntityId>,
+        selector: &CallableSelector,
         role: &str,
     ) -> Result<&ProgramEntity, String> {
+        if let Some(entity_id) = &selector.entity_id {
+            let entity = self
+                .program_entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == ProgramEntityKind::Callable && entity.id == *entity_id
+                })
+                .ok_or_else(|| format!("unknown callable entity '{entity_id}'"))?;
+            if let Some(label) = &selector.label
+                && entity.display_name != *label
+            {
+                return Err(format!(
+                    "callable entity '{entity_id}' is labelled '{}', not '{label}'",
+                    entity.display_name
+                ));
+            }
+            return Ok(entity);
+        }
+        let Some(display_name) = selector.label.as_deref() else {
+            return Err(format!(
+                "a {role} callable must be selected by entity ID or display name"
+            ));
+        };
         let candidates = self
             .program_entities
             .iter()
@@ -940,17 +1011,7 @@ impl PublishedSnapshot {
         if candidates.is_empty() {
             return Err(format!("unknown callable '{display_name}'"));
         }
-        if let Some(entity_id) = entity_id {
-            candidates
-                .iter()
-                .copied()
-                .find(|candidate| candidate.id == *entity_id)
-                .ok_or_else(|| {
-                    format!(
-                        "callable entity '{entity_id}' does not identify callable '{display_name}'"
-                    )
-                })
-        } else if candidates.len() == 1 {
+        if candidates.len() == 1 {
             Ok(candidates[0])
         } else {
             let candidate_ids = candidates
@@ -991,10 +1052,9 @@ impl PublishedSnapshot {
 
     pub(crate) fn query_callees(
         &self,
-        caller_name: &str,
-        caller_entity_id: Option<&ProgramEntityId>,
+        caller: &CallableSelector,
     ) -> Result<CallRelationshipsResult, String> {
-        let caller = self.select_callable(caller_name, caller_entity_id, "caller")?;
+        let caller = self.select_callable(caller, "caller")?;
         let relationships = self
             .call_graph_projection
             .relationships
@@ -1022,10 +1082,9 @@ impl PublishedSnapshot {
 
     pub(crate) fn query_callers(
         &self,
-        callee_name: &str,
-        callee_entity_id: Option<&ProgramEntityId>,
+        callee: &CallableSelector,
     ) -> Result<CallRelationshipsResult, String> {
-        let callee = self.select_callable(callee_name, callee_entity_id, "callee")?;
+        let callee = self.select_callable(callee, "callee")?;
         let relationships = self
             .call_graph_projection
             .relationships
@@ -1057,10 +1116,8 @@ impl PublishedSnapshot {
 
     pub(crate) fn query_call_path(
         &self,
-        start_name: &str,
-        start_entity_id: Option<&ProgramEntityId>,
-        end_name: &str,
-        end_entity_id: Option<&ProgramEntityId>,
+        start_selector: &CallableSelector,
+        end_selector: &CallableSelector,
         max_relationships: usize,
     ) -> Result<CallPathResult, String> {
         const MAX_SUPPORTED_RELATIONSHIPS: usize = 1_000;
@@ -1069,8 +1126,8 @@ impl PublishedSnapshot {
                 "call-path max relationships must be between 1 and {MAX_SUPPORTED_RELATIONSHIPS}"
             ));
         }
-        let start = self.select_callable(start_name, start_entity_id, "start")?;
-        let end = self.select_callable(end_name, end_entity_id, "end")?;
+        let start = self.select_callable(start_selector, "start")?;
+        let end = self.select_callable(end_selector, "end")?;
         let mut seen = BTreeSet::from([start.id.clone()]);
         let mut queue = VecDeque::from([(start.id.clone(), Vec::new())]);
         let mut found = None;
@@ -1317,8 +1374,7 @@ impl PublishedSnapshot {
         // cross-manifestation invariants that one raw contributor ID cannot
         // switch scopes and one input-scoped identity cannot span inputs.
         let mut scopes_by_id: BTreeMap<&str, CallableIdentityScope> = BTreeMap::new();
-        let mut acquired_input_by_local_identity: BTreeMap<&ContributorCallableIdentity, &str> =
-            BTreeMap::new();
+        let mut acquired_input_by_local_entity: BTreeMap<&str, &str> = BTreeMap::new();
         for manifestation in &self.manifestations {
             if !entities_by_id.contains_key(manifestation.entity_id.as_str()) {
                 return Err(format!(
@@ -1351,12 +1407,7 @@ impl PublishedSnapshot {
                 ));
             }
             // One contributor callable identity means one callable only
-            // within the scope its contributor declared for it. An identity
-            // scoped to its acquired input names a callable nothing outside
-            // that input can be, so it may not manifest in another: two
-            // identically named translation-unit-local callables are different
-            // callables, and neither the core nor a hand-edited export may
-            // join them.
+            // within the scope its contributor declared for it.
             let identity = &manifestation.contributor_callable_identity;
             match scopes_by_id.entry(identity.as_str()) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
@@ -1373,17 +1424,25 @@ impl PublishedSnapshot {
                     }
                 }
             }
-            if identity.scope() == CallableIdentityScope::AcquiredInput {
-                if let Some(first_input) = acquired_input_by_local_identity
-                    .insert(identity, manifestation.acquired_input_id.as_str())
-                {
-                    if first_input != manifestation.acquired_input_id.as_str() {
-                        return Err(format!(
-                            "contributor callable identity '{}' is scoped to acquired input '{first_input}' but also manifests in acquired input '{}'; a callable that is not visible beyond one acquired input is a different callable in another",
-                            identity, manifestation.acquired_input_id
-                        ));
-                    }
-                }
+            // An identity scoped to its acquired input names a callable
+            // nothing outside that input can be, so one program entity carrying
+            // it may not span acquired inputs: two identically named
+            // translation-unit-local callables are different callables, and
+            // neither the core nor a hand-edited export may join them into one
+            // entity. The identity text itself may legitimately repeat, because
+            // two byte-identical translation units are indistinguishable to a
+            // contributor yet are still separate acquired inputs.
+            if identity.scope() == CallableIdentityScope::AcquiredInput
+                && let Some(first_input) = acquired_input_by_local_entity.insert(
+                    manifestation.entity_id.as_str(),
+                    manifestation.acquired_input_id.as_str(),
+                )
+                && first_input != manifestation.acquired_input_id.as_str()
+            {
+                return Err(format!(
+                    "program entity '{}' carries the acquired-input-scoped identity '{identity}' in both acquired input '{first_input}' and '{}'; a callable that is not visible beyond one acquired input is a different callable in another",
+                    manifestation.entity_id, manifestation.acquired_input_id
+                ));
             }
             if !contributor_manifestations.insert((
                 manifestation.acquired_input_id.as_str(),
@@ -1898,16 +1957,31 @@ impl PublishedSnapshot {
                     resolution.call_site_id
                 )
             })?;
+            // A caller entity may manifest in several acquired inputs, because
+            // one linkage-namespace callable is declared by each input that
+            // names it. The manifestation this resolution rests on is the one
+            // read in the same acquired input as the call site.
+            let caller_input_id = call_site
+                .source_location
+                .as_ref()
+                .map(|location| &location.input_id)
+                .ok_or_else(|| {
+                    format!(
+                        "call site '{}' has no source location",
+                        resolution.call_site_id
+                    )
+                })?;
             let caller_manifestation = self
                 .manifestations
                 .iter()
                 .find(|manifestation| {
                     manifestation.entity_id == *caller_entity_id
                         && manifestation.observation_context_id == resolution.observation_context_id
+                        && manifestation.acquired_input_id == *caller_input_id
                 })
                 .ok_or_else(|| {
                     format!(
-                        "resolution for '{}' has no caller manifestation in observation context '{}'",
+                        "resolution for '{}' has no caller manifestation in observation context '{}' and acquired input '{caller_input_id}'",
                         resolution.call_site_id, resolution.observation_context_id
                     )
                 })?;
@@ -2310,7 +2384,6 @@ impl PublishedSnapshot {
 struct CallableIdentity {
     entity_id: ProgramEntityId,
     display_name: String,
-    representation: String,
     manifestation_ids_by_input: BTreeMap<AcquiredInputId, ManifestationId>,
 }
 
@@ -2361,8 +2434,31 @@ struct CorrespondenceSeed {
     manifestation_ids: Vec<ManifestationId>,
 }
 
+/// The callables published so far, keyed by the observation context and by the
+/// boundary the contributor's identity means one callable within.
+///
+/// A linkage-namespace identity is keyed by the identity alone, so every
+/// acquired input that declares the symbol manifests one entity. An
+/// acquired-input identity is keyed by the identity *and* the core-assigned
+/// acquired input, so two inputs that happen to assert the same text — two
+/// byte-identical translation units, which a contributor cannot tell apart —
+/// still publish two entities. Local callables are therefore held apart by
+/// construction rather than by rejecting the publication.
+type CallableIdentityKey = (ContributorCallableIdentity, Option<AcquiredInputId>);
 type CallableIdentities =
-    BTreeMap<ObservationContextId, BTreeMap<ContributorCallableIdentity, CallableIdentity>>;
+    BTreeMap<ObservationContextId, BTreeMap<CallableIdentityKey, CallableIdentity>>;
+
+/// The boundary an identity is looked up within during publication.
+fn callable_identity_key(
+    identity: &ContributorCallableIdentity,
+    acquired_input_id: &AcquiredInputId,
+) -> CallableIdentityKey {
+    let input = match identity.scope() {
+        CallableIdentityScope::AcquiredInput => Some(acquired_input_id.clone()),
+        CallableIdentityScope::LinkageNamespace => None,
+    };
+    (identity.clone(), input)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn ensure_callable(
@@ -2378,28 +2474,34 @@ fn ensure_callable(
     entities: &mut Vec<ProgramEntity>,
     manifestations: &mut Vec<Manifestation>,
 ) -> Result<CallableReference, String> {
+    let identity_key = callable_identity_key(contributor_callable_identity, acquired_input_id);
     let context_identities = identities.entry(context_id.clone()).or_default();
-    if let Some(identity) = context_identities.get_mut(contributor_callable_identity) {
-        if identity.display_name != name || identity.representation != representation {
+    if let Some(identity) = context_identities.get_mut(&identity_key) {
+        if identity.display_name != name {
             return Err(format!(
-                "contributed callable identity '{contributor_callable_identity}' has conflicting labels or representations in observation context '{context_id}'"
+                "contributed callable identity '{contributor_callable_identity}' has conflicting labels in observation context '{context_id}'"
             ));
         }
         let manifestation_id = if let Some(manifestation_id) =
             identity.manifestation_ids_by_input.get(acquired_input_id)
         {
-            manifestation_id.clone()
-        } else {
-            if contributor_callable_identity.scope() == CallableIdentityScope::AcquiredInput {
-                let first_input = identity
-                    .manifestation_ids_by_input
-                    .keys()
-                    .next()
-                    .expect("an existing callable identity must have a manifestation");
+            // A representation describes how one acquired input writes the
+            // callable, and a module writes each global once, so two
+            // representations for one identity in one input contradict each
+            // other. Across inputs they need not agree: one link-visible
+            // callable may be a `declare` in one unit and an alias in another,
+            // and each manifestation keeps how its own input wrote it.
+            let existing = manifestations
+                .iter()
+                .find(|manifestation| manifestation.id == *manifestation_id)
+                .expect("callable manifestation must exist");
+            if existing.representation != representation {
                 return Err(format!(
-                    "contributor callable identity '{contributor_callable_identity}' is scoped to acquired input '{first_input}' but also manifests in acquired input '{acquired_input_id}'; a callable that is not visible beyond one acquired input is a different callable in another"
+                    "contributed callable identity '{contributor_callable_identity}' has conflicting representations in acquired input '{acquired_input_id}' and observation context '{context_id}'"
                 ));
             }
+            manifestation_id.clone()
+        } else {
             let callable_index = manifestations.len();
             let manifestation_id = ManifestationId::new(format!(
                 "manifestation:{snapshot_id}:input:{input_index}:callable:{callable_index}"
@@ -2456,11 +2558,10 @@ fn ensure_callable(
         defined,
     });
     context_identities.insert(
-        contributor_callable_identity.clone(),
+        identity_key,
         CallableIdentity {
             entity_id: entity_id.clone(),
             display_name: name.into(),
-            representation: representation.into(),
             manifestation_ids_by_input: BTreeMap::from([(
                 acquired_input_id.clone(),
                 manifestation_id.clone(),
@@ -2663,7 +2764,10 @@ pub(crate) fn publish(
                     let caller = identities
                         .get(&call.observation_context_id)
                         .and_then(|context_identities| {
-                            context_identities.get(&call.caller_callable_identity)
+                            context_identities.get(&callable_identity_key(
+                                &call.caller_callable_identity,
+                                &input_id,
+                            ))
                         })
                         .and_then(|identity| {
                             identity

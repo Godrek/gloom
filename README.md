@@ -18,8 +18,10 @@ validates only a small part of that direction.
   alias that resolves to one. A call through a global variable, or through an
   alias to data, stays unresolved.
 - Preserve one linkage-namespace callable across definitions and declarations
-  in several acquired inputs, while keeping same-named translation-unit-local
-  callables distinct.
+  in several acquired inputs of one observation context, while keeping
+  same-named translation-unit-local callables distinct — including two
+  byte-identical translation units, which link as two units and stay two
+  callables.
 - Detect recursive strongly connected components.
 - Query zero-incoming functions, reachability, and shortest call paths.
 - Export schema 1.0 JSON.

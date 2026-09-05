@@ -14,8 +14,8 @@
 
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind, PublishedSnapshot,
-    Resolution,
+    CallableSelector, EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind,
+    PublishedSnapshot, Resolution,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -380,8 +380,10 @@ fn a_call_through_a_global_variable_still_names_no_callable() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "global_variable_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("global_variable_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();

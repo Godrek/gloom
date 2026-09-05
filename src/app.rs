@@ -3,7 +3,7 @@ use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
 use crate::snapshot::{
-    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, ProgramEntityId,
+    CallableSelector, Explanation, ExplanationHandle, NamedQueryResult, ObservationContext,
     PublishedSnapshot,
 };
 use crate::viewer;
@@ -27,18 +27,14 @@ pub enum NamedQuery {
         label: String,
     },
     Callees {
-        caller_name: String,
-        caller_entity_id: Option<ProgramEntityId>,
+        caller: CallableSelector,
     },
     Callers {
-        callee_name: String,
-        callee_entity_id: Option<ProgramEntityId>,
+        callee: CallableSelector,
     },
     CallPath {
-        start_name: String,
-        start_entity_id: Option<ProgramEntityId>,
-        end_name: String,
-        end_entity_id: Option<ProgramEntityId>,
+        start: CallableSelector,
+        end: CallableSelector,
         max_relationships: usize,
     },
 }
@@ -82,29 +78,19 @@ impl Application {
             NamedQuery::CallableSearch { label } => Ok(NamedQueryResult::CallableSearch(
                 snapshot.search_callables(&label),
             )),
-            NamedQuery::Callees {
-                caller_name,
-                caller_entity_id,
-            } => Ok(NamedQueryResult::CallRelationships(
-                snapshot.query_callees(&caller_name, caller_entity_id.as_ref())?,
+            NamedQuery::Callees { caller } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callees(&caller)?,
             )),
-            NamedQuery::Callers {
-                callee_name,
-                callee_entity_id,
-            } => Ok(NamedQueryResult::CallRelationships(
-                snapshot.query_callers(&callee_name, callee_entity_id.as_ref())?,
+            NamedQuery::Callers { callee } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callers(&callee)?,
             )),
             NamedQuery::CallPath {
-                start_name,
-                start_entity_id,
-                end_name,
-                end_entity_id,
+                start,
+                end,
                 max_relationships,
             } => Ok(NamedQueryResult::CallPath(snapshot.query_call_path(
-                &start_name,
-                start_entity_id.as_ref(),
-                &end_name,
-                end_entity_id.as_ref(),
+                &start,
+                &end,
                 max_relationships,
             )?)),
         }
@@ -164,6 +150,20 @@ impl Application {
                 document.schema_version
             ));
         }
+        // Building the graph keys callables by identity, so a document holding
+        // one identity twice would silently coalesce two callables into one —
+        // exactly the merge this schema now exists to prevent. A repeated
+        // identity is a contradiction in the document, so it is reported rather
+        // than resolved.
+        let mut identities = std::collections::BTreeSet::new();
+        for node in &document.nodes {
+            if !identities.insert(node.id.as_str()) {
+                return Err(format!(
+                    "graph contains more than one entity identified as '{}'",
+                    node.id
+                ));
+            }
+        }
         Ok(document)
     }
 
@@ -183,7 +183,15 @@ impl Application {
             // reported rather than resolved by picking a callable.
             Query::Reachable { start } => {
                 let start = analysis::resolve_callable_selector(&graph, &start)?;
-                QueryResult::Reachable(query_entities(&graph, analysis::reachable(&graph, &start)?))
+                // Reachability answers with a set, so it is ordered for a
+                // reader: by the label shown, then by identity, which keeps two
+                // same-labelled callables adjacent and the order stable.
+                let mut reached = query_entities(&graph, analysis::reachable(&graph, &start)?);
+                reached.sort_by(|left, right| {
+                    (&left.display_name, &left.entity_id)
+                        .cmp(&(&right.display_name, &right.entity_id))
+                });
+                QueryResult::Reachable(reached)
             }
             Query::ShortestPath { start, end } => {
                 let start = analysis::resolve_callable_selector(&graph, &start)?;

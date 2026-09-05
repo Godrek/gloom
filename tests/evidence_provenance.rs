@@ -1,12 +1,12 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    CallableIdentityScope, ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
-    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorCallableIdentity, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
-    EvidenceCapability, EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport,
-    LlvmTextContributor, ObservationContext, ObservationContextId, ProgramEntityKind,
-    PublishedSnapshot, Resolution,
+    CallableIdentityScope, CallableSelector, ContributedCallKind, ContributedCallSite,
+    ContributedCallSiteAttachment, ContributedCallSiteReference, ContributedCallable,
+    ContributedEvidence, ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim,
+    ContributorCallSiteId, ContributorCallableIdentity, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    ObservationContextId, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -547,8 +547,10 @@ fn a_trace_acquired_later_attaches_targets_to_the_published_call_site() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -632,8 +634,10 @@ fn explanations_show_static_and_runtime_provenance_side_by_side() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -932,8 +936,10 @@ fn call_site_references_select_one_of_two_llvm_inputs_sharing_a_call_site_identi
             .query_snapshot(
                 &snapshot,
                 NamedQuery::Callees {
-                    caller_name: caller.into(),
-                    caller_entity_id: None,
+                    caller: CallableSelector {
+                        label: Some(caller.into()),
+                        entity_id: None,
+                    },
                 },
             )
             .unwrap()

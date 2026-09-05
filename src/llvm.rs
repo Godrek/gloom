@@ -35,11 +35,101 @@ struct AcquiredLlvmIr {
 /// the declaration rather than introducing the callable itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedCallable {
-    pub name: String,
+    pub name: LlvmGlobal,
     pub defined: bool,
     pub line: usize,
     pub representation: &'static str,
     pub identity_scope: CallableIdentityScope,
+}
+
+/// A module-scope global identifier, as LLVM itself distinguishes them.
+///
+/// Two spellings that reach the linker as one symbol must reach Gloom as one
+/// identity, and two that reach it as different symbols must not be collapsed.
+/// Both cases were verified against the assembler:
+///
+/// - `@foo` and `@"\66oo"` emit the single symbol `foo`, because LLVM decodes
+///   a quoted name's `\XX` hex escapes before the symbol is emitted. A
+///   backslash not followed by two hex digits stays literal, and `\22` is how
+///   a quote is written inside a name, so a backslash never ends the token.
+/// - `@0` and `@"0"` emit two symbols, `__unnamed_1` and `0`: an unquoted
+///   all-digit global is an *unnamed* value numbered by its slot, while the
+///   quoted form is a *named* global whose name happens to be a digit.
+///
+/// Identity is therefore derived from this decoded, discriminated form rather
+/// than from the source spelling.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum LlvmGlobal {
+    Named(String),
+    Unnamed(u64),
+}
+
+impl LlvmGlobal {
+    /// Reads a global's identifier from the bytes between its sigil and its
+    /// end, given whether the source quoted it.
+    fn parse(text: &str, quoted: bool) -> Self {
+        if !quoted && !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(slot) = text.parse::<u64>() {
+                return Self::Unnamed(slot);
+            }
+        }
+        if quoted {
+            Self::Named(decode_llvm_escapes(text))
+        } else {
+            Self::Named(text.to_owned())
+        }
+    }
+
+    /// The label a person reads. Two different globals may share one, which is
+    /// exactly why it is not the identity.
+    fn display_name(&self) -> String {
+        match self {
+            Self::Named(name) => name.clone(),
+            Self::Unnamed(slot) => slot.to_string(),
+        }
+    }
+
+    /// The two parts a contributor callable identity is built from: a tag
+    /// distinguishing a named global from an unnamed slot, and the text that
+    /// names it. The tag lives in the identity's prefix rather than inside it,
+    /// so a global genuinely named `unnamed:0` can never collide with slot 0.
+    fn identity_parts(&self) -> (&'static str, String) {
+        match self {
+            Self::Named(name) => ("", name.clone()),
+            Self::Unnamed(slot) => ("-unnamed", slot.to_string()),
+        }
+    }
+
+    fn is_intrinsic(&self) -> bool {
+        matches!(self, Self::Named(name) if name.starts_with("llvm."))
+    }
+}
+
+/// Decodes the `\XX` hex escapes LLVM allows inside a quoted identifier. A
+/// backslash that is not followed by two hex digits is a literal backslash.
+fn decode_llvm_escapes(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escape = (bytes[index] == b'\\')
+            .then(|| bytes.get(index + 1..index + 3))
+            .flatten()
+            .and_then(|pair| std::str::from_utf8(pair).ok())
+            .filter(|pair| pair.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match escape {
+            Some(byte) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            None => {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// LLVM's local linkage types.
@@ -88,14 +178,15 @@ fn declared_identity_scope(
 /// fingerprint and are, as #23 established for call-site identities, genuinely
 /// indistinguishable to this contributor.
 fn contributor_callable_identity(
-    name: &str,
+    global: &LlvmGlobal,
     identity_scope: CallableIdentityScope,
     content_fingerprint: &str,
 ) -> ContributorCallableIdentity {
+    let (kind, text) = global.identity_parts();
     let id = match identity_scope {
-        CallableIdentityScope::LinkageNamespace => format!("llvm-symbol:{name}"),
+        CallableIdentityScope::LinkageNamespace => format!("llvm-symbol{kind}:{text}"),
         CallableIdentityScope::AcquiredInput => {
-            format!("llvm-module-local:{content_fingerprint}:{name}")
+            format!("llvm-module-local{kind}:{content_fingerprint}:{text}")
         }
     };
     ContributorCallableIdentity::new(id, identity_scope)
@@ -114,7 +205,7 @@ const LLVM_IFUNC: &str = LLVM_IFUNC_REPRESENTATION;
 /// resolved to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedCallee {
-    pub name: String,
+    pub name: LlvmGlobal,
     pub representation: &'static str,
     pub identity_scope: CallableIdentityScope,
 }
@@ -132,7 +223,7 @@ enum ObservedCallTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedCall {
-    pub caller: String,
+    pub caller: LlvmGlobal,
     pub caller_identity_scope: CallableIdentityScope,
     pub target: ObservedCallTarget,
     pub line: usize,
@@ -142,7 +233,7 @@ struct ObservedCall {
 /// against the module's declared globals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingCall {
-    pub caller: String,
+    pub caller: LlvmGlobal,
     pub callee: CalleeOperand,
     pub line: usize,
 }
@@ -216,7 +307,7 @@ impl EvidenceContributor for LlvmTextContributor {
                         callable.identity_scope,
                         &content_fingerprint,
                     ),
-                    display_name: callable.name,
+                    display_name: callable.name.display_name(),
                     defined: callable.defined,
                     representation: callable.representation.into(),
                     observation_context_id: context.id.clone(),
@@ -281,7 +372,7 @@ impl EvidenceContributor for LlvmTextContributor {
                                     callee.identity_scope,
                                     &content_fingerprint,
                                 ),
-                                callee_display_name: callee.name,
+                                callee_display_name: callee.name.display_name(),
                                 target_representation: callee.representation.into(),
                                 observation_context_id: context.id.clone(),
                                 evidence: vec![ContributedEvidence {
@@ -333,7 +424,7 @@ fn evidence_artifact(path: &Path, kind: &AcquiredInputKind, fingerprint: &str) -
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LlvmTokenKind {
     Word(String),
-    Global(String),
+    Global(LlvmGlobal),
     Local,
     Metadata,
     StringLiteral,
@@ -365,12 +456,9 @@ fn quoted_token_end(bytes: &[u8], start: usize, line: &mut usize) -> Result<usiz
     let mut index = start + 1;
     while index < bytes.len() {
         match bytes[index] {
-            b'\\' if index + 1 < bytes.len() => {
-                if bytes[index + 1] == b'\n' {
-                    *line += 1;
-                }
-                index += 2;
-            }
+            // A quoted LLVM identifier ends at the next `"`. A backslash never
+            // escapes it: `\22` is how a quote is written inside a name, as the
+            // assembler confirms.
             b'"' => return Ok(index + 1),
             b'\n' => {
                 *line += 1;
@@ -405,11 +493,12 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
                 let token_line = line;
                 let global = bytes[index] == b'@';
                 index += 1;
-                let name = if bytes.get(index) == Some(&b'"') {
+                let quoted = bytes.get(index) == Some(&b'"');
+                let text = if quoted {
                     let end = quoted_token_end(bytes, index, &mut line)?;
-                    let name = String::from_utf8_lossy(&bytes[index + 1..end - 1]).into_owned();
+                    let text = String::from_utf8_lossy(&bytes[index + 1..end - 1]).into_owned();
                     index = end;
-                    name
+                    text
                 } else {
                     let start = index;
                     while index < bytes.len() && llvm_name_byte(bytes[index]) {
@@ -419,7 +508,7 @@ fn tokenize_llvm_ir(text: &str) -> Result<Vec<LlvmToken>, String> {
                 };
                 tokens.push(LlvmToken {
                     kind: if global {
-                        LlvmTokenKind::Global(name)
+                        LlvmTokenKind::Global(LlvmGlobal::parse(&text, quoted))
                     } else {
                         LlvmTokenKind::Local
                     },
@@ -595,7 +684,7 @@ fn cast_conversion_keyword(tokens: &[LlvmToken], open: usize, close: usize) -> O
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CalleeOperand {
     /// A global name, reached directly or through identity-preserving casts.
-    Global(String),
+    Global(LlvmGlobal),
     /// An operand that names no global, such as a register or a computed
     /// address.
     Unnamed,
@@ -849,7 +938,7 @@ struct DeclaredGlobal {
 /// they are collected separately. Requiring the `@name =` of a definition, and
 /// reading the keyword only from the words that follow it, keeps unrelated
 /// globals and their initialisers out.
-fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredGlobal)> {
+fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&LlvmGlobal, DeclaredGlobal)> {
     let LlvmTokenKind::Global(name) = &tokens[index].kind else {
         return None;
     };
@@ -873,7 +962,7 @@ fn declared_alias(tokens: &[LlvmToken], index: usize) -> Option<(&str, DeclaredG
     // `ifunc` keyword.
     let identity_scope = declared_identity_scope(tokens, index + 2, index + 2 + offset);
     Some((
-        name.as_str(),
+        name,
         DeclaredGlobal {
             kind,
             identity_scope,
@@ -984,7 +1073,7 @@ fn type_separator(tokens: &[LlvmToken], start: usize, end: usize) -> Option<usiz
 /// becoming claimed targets named after the global.
 fn resolve_callee(
     callee: CalleeOperand,
-    declarations: &BTreeMap<String, DeclaredGlobal>,
+    declarations: &BTreeMap<LlvmGlobal, DeclaredGlobal>,
 ) -> ObservedCallTarget {
     match callee {
         CalleeOperand::Global(name) => match callable_declaration(&name, declarations) {
@@ -1007,8 +1096,8 @@ fn resolve_callee(
 /// reaches a global the module never declares, an aliasee the parse could not
 /// name, or a cycle is not callable.
 fn callable_declaration(
-    name: &str,
-    declarations: &BTreeMap<String, DeclaredGlobal>,
+    name: &LlvmGlobal,
+    declarations: &BTreeMap<LlvmGlobal, DeclaredGlobal>,
 ) -> Option<(&'static str, CallableIdentityScope)> {
     let declared = declarations.get(name)?;
     let representation = match declared.kind {
@@ -1021,7 +1110,7 @@ fn callable_declaration(
     // module however visible its aliasee is.
     let identity_scope = declared.identity_scope;
     let mut visited = BTreeSet::new();
-    let mut current = name.to_owned();
+    let mut current = name.clone();
     loop {
         if !visited.insert(current.clone()) {
             return None;
@@ -1048,13 +1137,13 @@ fn callable_declaration(
 /// staged with the line that declares it and resolved once the walk is over.
 enum PendingGlobal {
     Function(ObservedCallable),
-    AliasOrIfunc { name: String, line: usize },
+    AliasOrIfunc { name: LlvmGlobal, line: usize },
 }
 
 fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     let tokens = tokenize_llvm_ir(text)?;
     let mut observations = LlvmObservations::default();
-    let mut declarations: BTreeMap<String, DeclaredGlobal> = BTreeMap::new();
+    let mut declarations: BTreeMap<LlvmGlobal, DeclaredGlobal> = BTreeMap::new();
     let mut pending_globals: Vec<PendingGlobal> = Vec::new();
     let mut pending_calls: Vec<PendingCall> = Vec::new();
     let mut current = None;
@@ -1063,7 +1152,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     while index < tokens.len() {
         if current.is_none() {
             if let Some((name, declaration)) = declared_alias(&tokens, index) {
-                let name = name.to_owned();
+                let name = name.clone();
                 pending_globals.push(PendingGlobal::AliasOrIfunc {
                     name: name.clone(),
                     line: tokens[index].line,
@@ -1109,13 +1198,17 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
                 identity_scope,
             }));
             let signature_end = function_signature_end(&tokens, name_index).ok_or_else(|| {
-                format!("LLVM function '{name}' has an incomplete parameter list")
+                format!(
+                    "LLVM function '{}' has an incomplete parameter list",
+                    name.display_name()
+                )
             })?;
             if !defined {
                 index = signature_end + 1;
                 continue;
             }
-            let (body_index, end) = function_body_bounds(&tokens, signature_end, name)?;
+            let (body_index, end) =
+                function_body_bounds(&tokens, signature_end, &name.display_name())?;
             current = Some(name.clone());
             body_end = end;
             index = body_index + 1;
@@ -1147,7 +1240,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     let function_names = pending_globals
         .iter()
         .filter_map(|global| match global {
-            PendingGlobal::Function(callable) => Some(callable.name.as_str()),
+            PendingGlobal::Function(callable) => Some(callable.name.clone()),
             PendingGlobal::AliasOrIfunc { .. } => None,
         })
         .collect::<BTreeSet<_>>();
@@ -1156,7 +1249,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
         match global {
             PendingGlobal::Function(callable) => observations.callables.push(callable.clone()),
             PendingGlobal::AliasOrIfunc { name, line } => {
-                if function_names.contains(name.as_str()) || !aliased_names.insert(name.as_str()) {
+                if function_names.contains(name) || !aliased_names.insert(name.clone()) {
                     continue;
                 }
                 if let Some((representation, identity_scope)) =
@@ -1179,8 +1272,7 @@ fn observe_llvm_ir(text: &str) -> Result<LlvmObservations, String> {
     // points at, after the call site.
     for call in pending_calls {
         let target = resolve_callee(call.callee, &declarations);
-        if matches!(&target, ObservedCallTarget::Direct(callee) if callee.name.starts_with("llvm."))
-        {
+        if matches!(&target, ObservedCallTarget::Direct(callee) if callee.name.is_intrinsic()) {
             continue;
         }
         // A caller is always a function this module defines, so the module
@@ -1231,7 +1323,7 @@ pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> 
         );
         graph.add_node(Node::callable(
             graph_node_id(&identity, source),
-            callable.name,
+            callable.name.display_name(),
             callable.defined,
             source.map(str::to_owned),
         ));
@@ -1251,7 +1343,12 @@ pub fn parse_llvm_ir(text: &str, source: Option<&str>) -> Result<Graph, String> 
                     &content_fingerprint,
                 );
                 let callee_id = graph_node_id(&callee_identity, source);
-                graph.add_node(Node::callable(&callee_id, &callee.name, false, None));
+                graph.add_node(Node::callable(
+                    &callee_id,
+                    callee.name.display_name(),
+                    false,
+                    None,
+                ));
                 graph.add_edge(&caller, &callee_id, "direct-call");
             }
             ObservedCallTarget::Indirect => {

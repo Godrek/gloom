@@ -1,6 +1,7 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind,
+    CallableSelector, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    ProgramEntityKind,
 };
 use std::path::PathBuf;
 
@@ -123,8 +124,10 @@ fn explains_one_direct_call_from_evidence_to_projection() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();

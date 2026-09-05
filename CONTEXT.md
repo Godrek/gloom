@@ -73,7 +73,7 @@ The identity an evidence contributor asserts for a callable within one observati
 _Avoid_: Symbol name, function name
 
 **Callable identity scope**:
-The boundary within which one contributor callable identity means one callable: the acquired input it was read from, or the linkage namespace that joins acquired inputs. A callable that is not visible beyond one acquired input is a different callable in another, however the two are spelled.
+The boundary within which one contributor callable identity means one callable: the acquired input it was read from, or the linkage namespace an observation context joins its acquired inputs in. A callable that is not visible beyond one acquired input is a different callable in another, however the two are spelled.
 _Avoid_: Visibility, linkage flag
 
 **Contributor call-site identity**:

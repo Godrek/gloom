@@ -1,12 +1,12 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
     CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
-    CallRelationshipsResult, CallableIdentityScope, CompletenessBasis, ContributedCallKind,
-    ContributedCallSite, ContributedCallable, ContributedEvidence, ContributedEvidenceLocation,
-    ContributedInput, ContributedTargetClaim, ContributorCallSiteId, ContributorCallableIdentity,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
+    CallRelationshipsResult, CallableIdentityScope, CallableSelector, CompletenessBasis,
+    ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
+    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
+    ContributorCallableIdentity, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
+    EvidenceCapability, EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport,
+    LlvmTextContributor, ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -493,8 +493,10 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "worker".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("worker".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap_err();
@@ -510,8 +512,10 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "worker".into(),
-                caller_entity_id: Some(selected.id.clone()),
+                caller: CallableSelector {
+                    label: Some("worker".into()),
+                    entity_id: Some(selected.id.clone()),
+                },
             },
         )
         .unwrap();
@@ -645,8 +649,10 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1023,8 +1029,10 @@ fn named_queries_and_exported_projections_preserve_unresolved_call_sites() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1044,8 +1052,10 @@ fn named_queries_and_exported_projections_preserve_unresolved_call_sites() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "run_callback".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("run_callback".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1112,8 +1122,10 @@ fn tokenized_llvm_calls_ignore_comments_newlines_and_label_placement() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "tokenized_calls".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("tokenized_calls".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1183,8 +1195,10 @@ fn llvm_metadata_and_aggregate_prefixes_preserve_instruction_boundaries() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "metadata_only".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("metadata_only".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1195,8 +1209,10 @@ fn llvm_metadata_and_aggregate_prefixes_preserve_instruction_boundaries() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "aggregate_prefix".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("aggregate_prefix".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1232,8 +1248,10 @@ fn explicit_function_types_do_not_hide_the_callee_operand() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "named_type_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("named_type_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1292,8 +1310,10 @@ fn literal_aggregate_return_types_do_not_end_the_callee_search() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "aggregate_return_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("aggregate_return_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1458,8 +1478,10 @@ fn quoted_identifier_braces_do_not_hide_following_indirect_calls() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "quoted_brace_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("quoted_brace_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1503,8 +1525,10 @@ fn unresolved_call_site_explanations_are_inspectable_in_the_viewer() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
@@ -1607,8 +1631,7 @@ fn llvm_callee_query(
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: caller_name.into(),
-                caller_entity_id: None,
+                caller: CallableSelector::by_label(caller_name),
             },
         )
         .unwrap();

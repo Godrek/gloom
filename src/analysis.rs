@@ -101,12 +101,12 @@ pub fn entry_points(graph: &Graph) -> Vec<String> {
         .collect()
 }
 
-/// Resolves a selector a user typed to one node identity.
+/// Resolves a selector a user typed to one callable's program-entity identity.
 ///
-/// A display name is a label, so several nodes may carry it: a callable
-/// private to its translation unit keeps an identity of its own in every unit
-/// that declares one. A selector that names an identity exactly selects that
-/// node; otherwise it is matched against labels, and an ambiguous label is
+/// A display name is a label, so several callables may carry it: one private to
+/// its translation unit keeps an identity of its own in every unit that
+/// declares one. A selector that names an identity exactly selects that
+/// callable; otherwise it is matched against labels, and an ambiguous label is
 /// reported with the identities to choose from rather than resolved by picking
 /// one of them.
 pub fn resolve_callable_selector(graph: &Graph, selector: &str) -> Result<String, String> {
@@ -124,7 +124,7 @@ pub fn resolve_callable_selector(graph: &Graph, selector: &str) -> Result<String
         .map(|node| node.id.as_str())
         .collect::<Vec<_>>();
     match matched.as_slice() {
-        [] => Err(format!("unknown function '{selector}'")),
+        [] => Err(format!("unknown callable '{selector}'")),
         [id] => Ok((*id).to_owned()),
         several => Err(format!(
             "function '{selector}' is ambiguous; select one of: {}",
@@ -135,7 +135,7 @@ pub fn resolve_callable_selector(graph: &Graph, selector: &str) -> Result<String
 
 pub fn reachable(graph: &Graph, start: &str) -> Result<Vec<String>, String> {
     if !graph.nodes.contains_key(start) {
-        return Err(format!("unknown function '{start}'"));
+        return Err(format!("unknown callable '{start}'"));
     }
     let links = adjacency(graph);
     let mut seen = BTreeSet::from([start.to_owned()]);
@@ -154,7 +154,7 @@ pub fn reachable(graph: &Graph, start: &str) -> Result<Vec<String>, String> {
 pub fn shortest_path(graph: &Graph, start: &str, end: &str) -> Result<Option<Vec<String>>, String> {
     for name in [start, end] {
         if !graph.nodes.contains_key(name) {
-            return Err(format!("unknown function '{name}'"));
+            return Err(format!("unknown callable '{name}'"));
         }
     }
     let links = adjacency(graph);

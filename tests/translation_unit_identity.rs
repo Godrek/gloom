@@ -14,9 +14,9 @@
 
 use gloom::app::{Application, NamedQuery, Query};
 use gloom::{
-    CallPathResult, CallRelationshipsResult, CallableIdentityScope, LlvmTextContributor,
-    Manifestation, ObservationContext, ProgramEntity, ProgramEntityKind, PublishedSnapshot,
-    SearchedCallable,
+    CallPathResult, CallRelationshipsResult, CallableIdentityScope, CallableSelector,
+    LlvmTextContributor, Manifestation, ObservationContext, ProgramEntity, ProgramEntityKind,
+    PublishedSnapshot, SearchedCallable,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -76,8 +76,10 @@ fn callees(snapshot: &PublishedSnapshot, caller: &ProgramEntity) -> Vec<String> 
         .query_snapshot(
             snapshot,
             NamedQuery::Callees {
-                caller_name: caller.display_name.clone(),
-                caller_entity_id: Some(caller.id.clone()),
+                caller: CallableSelector {
+                    label: Some(caller.display_name.clone()),
+                    entity_id: Some(caller.id.clone()),
+                },
             },
         )
         .unwrap();
@@ -169,7 +171,8 @@ fn direct_calls_resolve_to_the_local_callable_of_their_own_translation_unit() {
     assert_eq!(callees(&snapshot, first_helper), ["helper -> first_only"]);
     assert_eq!(callees(&snapshot, second_helper), ["helper -> second_only"]);
 
-    // Each entry point reaches the `helper` of its own unit, by identity.
+    // Each unit's exported caller reaches the `helper` of its own unit, by
+    // identity.
     for (entry, helper) in [
         ("first_entry", first_helper),
         ("second_entry", second_helper),
@@ -178,8 +181,10 @@ fn direct_calls_resolve_to_the_local_callable_of_their_own_translation_unit() {
         let result = relationship_query(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: entry.into(),
-                caller_entity_id: Some(caller.id.clone()),
+                caller: CallableSelector {
+                    label: Some(entry.into()),
+                    entity_id: Some(caller.id.clone()),
+                },
             },
         );
         let reached = result
@@ -241,8 +246,10 @@ fn callable_search_distinguishes_identically_named_locals() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "helper".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("helper".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap_err();
@@ -270,8 +277,10 @@ fn named_queries_never_cross_between_unrelated_local_callables() {
         let callers = relationship_query(
             &snapshot,
             NamedQuery::Callers {
-                callee_name: "helper".into(),
-                callee_entity_id: Some(helper.id.clone()),
+                callee: CallableSelector {
+                    label: Some("helper".into()),
+                    entity_id: Some(helper.id.clone()),
+                },
             },
         );
         assert_eq!(callers.relationships.len(), 1);
@@ -289,10 +298,14 @@ fn named_queries_never_cross_between_unrelated_local_callables() {
     let local_path = path_query(
         &snapshot,
         NamedQuery::CallPath {
-            start_name: "first_entry".into(),
-            start_entity_id: Some(first_entry.id.clone()),
-            end_name: "first_only".into(),
-            end_entity_id: Some(first_only.id.clone()),
+            start: CallableSelector {
+                label: Some("first_entry".into()),
+                entity_id: Some(first_entry.id.clone()),
+            },
+            end: CallableSelector {
+                label: Some("first_only".into()),
+                entity_id: Some(first_only.id.clone()),
+            },
             max_relationships: 2,
         },
     );
@@ -309,10 +322,14 @@ fn named_queries_never_cross_between_unrelated_local_callables() {
     let cross_unit = path_query(
         &snapshot,
         NamedQuery::CallPath {
-            start_name: "first_entry".into(),
-            start_entity_id: Some(first_entry.id.clone()),
-            end_name: "second_only".into(),
-            end_entity_id: Some(second_only.id.clone()),
+            start: CallableSelector {
+                label: Some("first_entry".into()),
+                entity_id: Some(first_entry.id.clone()),
+            },
+            end: CallableSelector {
+                label: Some("second_only".into()),
+                entity_id: Some(second_only.id.clone()),
+            },
             max_relationships: 4,
         },
     );
@@ -321,10 +338,14 @@ fn named_queries_never_cross_between_unrelated_local_callables() {
     let bounded = path_query(
         &snapshot,
         NamedQuery::CallPath {
-            start_name: "first_entry".into(),
-            start_entity_id: Some(first_entry.id.clone()),
-            end_name: "first_only".into(),
-            end_entity_id: Some(first_only.id.clone()),
+            start: CallableSelector {
+                label: Some("first_entry".into()),
+                entity_id: Some(first_entry.id.clone()),
+            },
+            end: CallableSelector {
+                label: Some("first_only".into()),
+                entity_id: Some(first_only.id.clone()),
+            },
             max_relationships: 1,
         },
     );
@@ -337,10 +358,14 @@ fn named_queries_never_cross_between_unrelated_local_callables() {
         .query_snapshot(
             &snapshot,
             NamedQuery::CallPath {
-                start_name: "helper".into(),
-                start_entity_id: None,
-                end_name: "first_only".into(),
-                end_entity_id: Some(first_only.id.clone()),
+                start: CallableSelector {
+                    label: Some("helper".into()),
+                    entity_id: None,
+                },
+                end: CallableSelector {
+                    label: Some("first_only".into()),
+                    entity_id: Some(first_only.id.clone()),
+                },
                 max_relationships: 2,
             },
         )
@@ -481,8 +506,10 @@ fn equal_names_alone_create_no_correspondence_claim() {
     let from_second = relationship_query(
         &snapshot,
         NamedQuery::Callees {
-            caller_name: "second_entry".into(),
-            caller_entity_id: Some(second_entry.id.clone()),
+            caller: CallableSelector {
+                label: Some("second_entry".into()),
+                entity_id: Some(second_entry.id.clone()),
+            },
         },
     );
     let shared_call = from_second
@@ -498,8 +525,12 @@ fn equal_names_alone_create_no_correspondence_claim() {
     assert_eq!(snapshot.observation_contexts().len(), 1);
 }
 
-/// An identity a contributor scoped to one acquired input may not appear in
-/// another, whether a hand edit puts it there or an acquisition does.
+/// A program entity carrying an acquired-input-scoped identity may not span
+/// acquired inputs, so a hand edit cannot join two translation-unit-local
+/// callables into one. Repeating the identity *text* across inputs is not that
+/// join: two byte-identical translation units are indistinguishable to a
+/// contributor and still compile and link as two separate units, so they
+/// publish two entities rather than being refused.
 #[test]
 fn an_input_scoped_callable_identity_may_not_span_acquired_inputs() {
     let snapshot = published("local-shadow-scope");
@@ -509,11 +540,15 @@ fn an_input_scoped_callable_identity_may_not_span_acquired_inputs() {
         .contributor_callable_identity
         .as_str()
         .to_owned();
+    let joined_entity = manifestations_of(&snapshot, "helper")[0].entity_id.clone();
+    // Give both locals one identity *and* one entity: the merge the scope
+    // exists to forbid.
     for manifestation in document["manifestations"].as_array_mut().unwrap() {
         if manifestation["contributor_callable_identity"]["scope"]
             == serde_json::json!("acquired-input")
         {
             manifestation["contributor_callable_identity"]["id"] = serde_json::json!(joined);
+            manifestation["entity_id"] = serde_json::json!(joined_entity);
         }
     }
 
@@ -534,20 +569,31 @@ fn an_input_scoped_callable_identity_may_not_span_acquired_inputs() {
         "deserializing a tampered value must fail with the error the loader reports"
     );
     assert!(
-        loaded.contains("is scoped to acquired input")
+        loaded.contains("carries the acquired-input-scoped identity")
             && loaded.contains("is a different callable in another"),
         "unexpected error: {loaded}"
     );
 
-    // Acquiring one translation unit twice is the same conflict reached
-    // honestly: the contributor cannot tell the two acquisitions apart, so it
-    // asserts one input-scoped identity for what publication treats as two
-    // acquired inputs, and the publication is refused rather than merged.
-    let repeated = publish_units("local-shadow-repeated", &[FIRST_UNIT, FIRST_UNIT]).unwrap_err();
-    assert!(
-        repeated.contains("is scoped to acquired input"),
-        "unexpected error: {repeated}"
+    // Acquiring one translation unit twice is a real multi-unit shape: the two
+    // objects link together, each keeping its own local @helper. The
+    // contributor cannot tell the acquisitions apart and asserts the same
+    // identity text for both, so the core keys the identity by the acquired
+    // input it assigned and publishes two entities.
+    let repeated = publish_units("local-shadow-repeated", &[FIRST_UNIT, FIRST_UNIT]).unwrap();
+    let repeated_helpers = callables(&repeated, "helper");
+    assert_eq!(repeated_helpers.len(), 2, "{repeated_helpers:?}");
+    assert_ne!(repeated_helpers[0].id, repeated_helpers[1].id);
+    assert_eq!(
+        manifestations_of(&repeated, "helper")
+            .iter()
+            .map(|manifestation| manifestation.contributor_callable_identity.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        1,
+        "the contributor cannot distinguish two acquisitions of one text"
     );
+    // The exported symbol both acquisitions declare stays one callable.
+    assert_eq!(callables(&repeated, "shared_service").len(), 1);
 }
 
 /// The linkage keyword decides the identity scope wherever the LangRef allows
@@ -592,5 +638,114 @@ fn linkage_decides_identity_scope_wherever_the_keyword_may_sit() {
             ("resolver", CallableIdentityScope::AcquiredInput),
             ("user", CallableIdentityScope::LinkageNamespace),
         ]
+    );
+}
+
+/// A program-entity identity selects a callable on its own: it *is* the
+/// identity, so no query needs the label beside it. A label supplied with it is
+/// checked rather than ignored, so a stale label is reported instead of
+/// silently answering about something else.
+#[test]
+fn an_entity_identity_selects_a_callable_without_its_label() {
+    let snapshot = published("local-shadow-selection");
+    let second_helper = callables(&snapshot, "helper")
+        .into_iter()
+        .find(|helper| helper.id.as_str().contains("input:1"))
+        .unwrap();
+
+    let by_identity = relationship_query(
+        &snapshot,
+        NamedQuery::Callees {
+            caller: CallableSelector::by_entity_id(second_helper.id.clone()),
+        },
+    );
+    assert_eq!(by_identity.selected_callable_entity_id, second_helper.id);
+    assert_eq!(
+        by_identity
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["second_only"]
+    );
+
+    // The same selection through the bounded path query, with neither end
+    // named.
+    let path = path_query(
+        &snapshot,
+        NamedQuery::CallPath {
+            start: CallableSelector::by_entity_id(second_helper.id.clone()),
+            end: CallableSelector::by_entity_id(callables(&snapshot, "second_only")[0].id.clone()),
+            max_relationships: 2,
+        },
+    );
+    assert_eq!(path.path.unwrap().len(), 1);
+
+    // A label that contradicts the identity is reported.
+    let error = Application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller: CallableSelector {
+                    label: Some("first_entry".into()),
+                    entity_id: Some(second_helper.id.clone()),
+                },
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("is labelled 'helper', not 'first_entry'"),
+        "unexpected error: {error}"
+    );
+
+    // Neither half is not a selection.
+    let error = Application
+        .query_snapshot(
+            &snapshot,
+            NamedQuery::Callees {
+                caller: CallableSelector::default(),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("must be selected by entity ID or display name"),
+        "unexpected error: {error}"
+    );
+}
+
+/// A prototype export that identifies two callables the same way is a
+/// contradiction, so it is reported rather than silently coalesced into one
+/// callable that reaches both units' callees.
+#[test]
+fn a_prototype_export_that_repeats_an_identity_is_rejected() {
+    let document = Application
+        .build(
+            &[PathBuf::from(FIRST_UNIT), PathBuf::from(SECOND_UNIT)],
+            "clang",
+            &[],
+        )
+        .unwrap();
+    let mut exported: Value =
+        serde_json::from_str(&Application.export_json(&document).unwrap()).unwrap();
+
+    let helper_ids = document
+        .nodes
+        .iter()
+        .filter(|node| node.label == "helper")
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(helper_ids.len(), 2);
+    for node in exported["nodes"].as_array_mut().unwrap() {
+        if node["id"] == serde_json::json!(helper_ids[1]) {
+            node["id"] = serde_json::json!(helper_ids[0]);
+        }
+    }
+
+    let error = Application
+        .load_json(&serde_json::to_string(&exported).unwrap())
+        .unwrap_err();
+    assert!(
+        error.contains("more than one entity identified as"),
+        "unexpected error: {error}"
     );
 }
