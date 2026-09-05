@@ -722,6 +722,10 @@ enum CalleeOperand {
 /// scan past it for a global inside: which global such an expression yields is
 /// reasoning this evidence does not support, and guessing one would publish a
 /// target claim the module does not make.
+/// In particular, `ptrauth` signs a pointer; it does not yield its raw function
+/// address. Resolving a call through it would require authentication semantics
+/// (including the call's key and discriminator), which this extractor does not
+/// model. See <https://llvm.org/docs/PointerAuth.html#operand-bundle>.
 fn operand_global(tokens: &[LlvmToken], index: usize) -> CalleeOperand {
     let mut index = index;
     loop {
@@ -1550,6 +1554,37 @@ declare void @declared_target()"#;
                 .call_count,
             4
         );
+    }
+
+    #[test]
+    fn signed_pointer_constants_do_not_publish_unverified_target_claims() {
+        // Cover the archived signed-pointer examples, plus casts and call
+        // bundles. A referenced function or discriminator alone does not
+        // establish that the signed pointer is authenticated for this call.
+        for instruction in [
+            "call void ptrauth (ptr @target, i32 0, i64 7, ptr @discriminator)()",
+            "call void ptrauth (ptr null, i32 0, i64 7, ptr @target)()",
+            "call void bitcast (ptr ptrauth (ptr @target, i32 0) to ptr)()",
+            "call void ptrauth (ptr bitcast (ptr @target to ptr), i32 0)()",
+            "call void ptrauth (ptr @target, i32 0, i64 7)() [ \"ptrauth\"(i32 1, i64 7) ]",
+            "call void ptrauth (ptr @target, i32 0, i64 7)() [ \"ptrauth\"(i32 0, i64 7) ]",
+        ] {
+            let ir = format!(
+                "declare void @target()\n@discriminator = external global i8\n\
+                 define void @caller() {{\n{instruction}\nret void\n}}"
+            );
+            let graph = parse_llvm_ir(&ir, Some("signed-pointer.ll")).unwrap();
+            let caller = node_id(&graph, "caller");
+            assert_eq!(graph.edges.len(), 1, "{instruction}");
+            assert!(
+                graph.edges.contains_key(&(
+                    caller,
+                    "unknown:indirect-call-target".into(),
+                    "indirect-call".into()
+                )),
+                "{instruction}"
+            );
+        }
     }
 
     #[test]
