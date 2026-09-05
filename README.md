@@ -144,6 +144,9 @@ Open `graph.html` directly or serve the directory with
 
 ## Development
 
+The viewer integration tests require Node.js 22 or newer to execute the generated
+standalone HTML and compare its expanded evidence with the explanation query.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

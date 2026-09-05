@@ -852,6 +852,10 @@ impl PublishedSnapshot {
         &self.correspondence_claims
     }
 
+    pub(crate) fn derivations(&self) -> &[Derivation] {
+        &self.derivations
+    }
+
     pub fn call_graph_projection(&self) -> &CallGraphProjection {
         &self.call_graph_projection
     }

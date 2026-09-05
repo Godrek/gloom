@@ -273,6 +273,99 @@ fn publish(identity_evidenced_contexts: usize) -> PublishedSnapshot {
         .unwrap()
 }
 
+#[test]
+fn viewer_expansions_preserve_complete_cross_context_explanations() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Each site targets only one manifestation. Its correspondence must still
+    // bring identity evidence from other contexts, and shared support should
+    // be serialized once despite being needed by all three expansions.
+    struct SeparateSites;
+    impl EvidenceContributor for SeparateSites {
+        fn identity(&self) -> ContributorIdentity {
+            SharedTargetFixture {
+                identity_evidenced_contexts: 3,
+            }
+            .identity()
+        }
+
+        fn contribute(
+            &self,
+            input: &Path,
+            context: &ObservationContext,
+        ) -> Result<EvidenceContribution, String> {
+            let mut contribution = SharedTargetFixture {
+                identity_evidenced_contexts: 3,
+            }
+            .contribute(input, context)?;
+            let site = contribution.call_sites.remove(0);
+            contribution.call_sites = (0..3)
+                .map(|index| {
+                    let mut separate = site.clone();
+                    separate.contributor_call_site_id =
+                        ContributorCallSiteId::new(format!("dispatch:{index}")).unwrap();
+                    separate.target_claims = vec![site.target_claims[0].clone()];
+                    separate
+                })
+                .collect();
+            Ok(contribution)
+        }
+    }
+    let snapshot = Application
+        .publish_snapshot(
+            &[PathBuf::from("shared-target.fixture")],
+            ObservationContext::static_analysis(
+                "snapshot:viewer",
+                "viewer",
+                "debug",
+                "fixture",
+                "fixture.shared-target",
+                "1",
+                "analysis",
+            ),
+            &SeparateSites,
+        )
+        .unwrap();
+    let explanations = snapshot
+        .call_graph_projection()
+        .call_sites
+        .iter()
+        .map(|site| {
+            Application
+                .explain_snapshot(&snapshot, &site.explanation_handle)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        explanations
+            .iter()
+            .any(|explanation| !explanation.correspondence_claims.is_empty())
+    );
+    assert!(
+        explanations
+            .iter()
+            .all(|explanation| explanation.target_claims.len() == 1
+                && explanation.correspondence_claims[0].manifestation_ids.len() == 3)
+    );
+    let input = serde_json::json!({
+        "html": Application.render_snapshot_viewer(&snapshot).unwrap(),
+        "explanations": explanations,
+    });
+    let mut child = Command::new("node")
+        .arg("tests/support/snapshot-viewer.cjs")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Node.js is required to exercise the standalone viewer");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
 fn shared_target_manifestations(snapshot: &PublishedSnapshot) -> Vec<&Manifestation> {
     snapshot
         .manifestations()
