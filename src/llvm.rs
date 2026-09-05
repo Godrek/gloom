@@ -60,7 +60,7 @@ struct ObservedCallable {
 /// than from the source spelling.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum LlvmGlobal {
-    Named(String),
+    Named(Vec<u8>),
     Unnamed(u64),
 }
 
@@ -76,7 +76,7 @@ impl LlvmGlobal {
         if quoted {
             Self::Named(decode_llvm_escapes(text))
         } else {
-            Self::Named(text.to_owned())
+            Self::Named(text.as_bytes().to_vec())
         }
     }
 
@@ -84,7 +84,7 @@ impl LlvmGlobal {
     /// exactly why it is not the identity.
     fn display_name(&self) -> String {
         match self {
-            Self::Named(name) => name.clone(),
+            Self::Named(name) => String::from_utf8_lossy(name).into_owned(),
             Self::Unnamed(slot) => slot.to_string(),
         }
     }
@@ -95,19 +95,35 @@ impl LlvmGlobal {
     /// so a global genuinely named `unnamed:0` can never collide with slot 0.
     fn identity_parts(&self) -> (&'static str, String) {
         match self {
-            Self::Named(name) => ("", name.clone()),
+            Self::Named(name) => {
+                // Encode bytes outside the ordinary identifier alphabet,
+                // including the escape marker itself. Identity stays lossless
+                // and cannot acquire trailing whitespace from a quoted name.
+                let mut encoded = String::new();
+                for &byte in name {
+                    if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-' | b'$') {
+                        encoded.push(char::from(byte));
+                    } else {
+                        use std::fmt::Write;
+                        write!(&mut encoded, "%{byte:02X}")
+                            .expect("writing an identity into a String cannot fail");
+                    }
+                }
+                ("", encoded)
+            }
             Self::Unnamed(slot) => ("-unnamed", slot.to_string()),
         }
     }
 
     fn is_intrinsic(&self) -> bool {
-        matches!(self, Self::Named(name) if name.starts_with("llvm."))
+        matches!(self, Self::Named(name) if name.starts_with(b"llvm."))
     }
 }
 
 /// Decodes the `\XX` hex escapes LLVM allows inside a quoted identifier. A
 /// backslash that is not followed by two hex digits is a literal backslash.
-fn decode_llvm_escapes(text: &str) -> String {
+/// LLVM identifiers can contain non-UTF-8 bytes, which must remain distinct.
+fn decode_llvm_escapes(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -129,7 +145,7 @@ fn decode_llvm_escapes(text: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&decoded).into_owned()
+    decoded
 }
 
 /// LLVM's local linkage types.

@@ -83,6 +83,7 @@ enum Commands {
     /// A callable is selected by display name, by program-entity ID, or by
     /// both: the name is a label, so an ID alone is enough, and a name alone is
     /// enough when it is unambiguous.
+    #[command(group(clap::ArgGroup::new("path_selection").args(CALL_PATH_KIND.iter().copied()).multiple(true)))]
     QuerySnapshot {
         snapshot: PathBuf,
         /// Find callable entities whose display name contains LABEL, with the
@@ -108,7 +109,7 @@ enum Commands {
         start_entity_id: Option<String>,
         #[arg(long, value_name = "ID", conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).collect::<Vec<_>>())]
         end_entity_id: Option<String>,
-        #[arg(long, requires = "call_path")]
+        #[arg(long, requires = "path_selection")]
         max_relationships: Option<usize>,
         #[arg(long, conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).chain(CALL_PATH_KIND).collect::<Vec<_>>())]
         explain: Option<String>,
@@ -340,5 +341,88 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("gloom: error: {error}");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_path_bound_accepts_entity_ids_without_labels() {
+        let cli = Cli::try_parse_from([
+            "gloom",
+            "query-snapshot",
+            "snapshot.json",
+            "--start-entity-id",
+            "entity:start",
+            "--end-entity-id",
+            "entity:end",
+            "--max-relationships",
+            "20",
+        ])
+        .unwrap();
+        let Commands::QuerySnapshot {
+            call_path,
+            start_entity_id,
+            end_entity_id,
+            max_relationships,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a snapshot query");
+        };
+        assert_eq!(call_path, None);
+        assert_eq!(start_entity_id.as_deref(), Some("entity:start"));
+        assert_eq!(end_entity_id.as_deref(), Some("entity:end"));
+        assert_eq!(max_relationships, Some(20));
+    }
+
+    #[test]
+    fn call_path_bound_accepts_labels_with_entity_ids() {
+        let cli = Cli::try_parse_from([
+            "gloom",
+            "query-snapshot",
+            "snapshot.json",
+            "--call-path",
+            "helper",
+            "helper",
+            "--start-entity-id",
+            "entity:start",
+            "--end-entity-id",
+            "entity:end",
+            "--max-relationships",
+            "20",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::QuerySnapshot {
+                max_relationships: Some(20),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn call_path_bound_requires_a_path_query() {
+        for query in [
+            Vec::<&str>::new(),
+            vec!["--search-callables", "helper"],
+            vec!["--callees", "main"],
+            vec!["--caller-entity-id", "entity:caller"],
+            vec!["--callers", "helper"],
+            vec!["--callee-entity-id", "entity:callee"],
+            vec!["--explain", "explanation:call"],
+        ] {
+            let mut args = vec!["gloom", "query-snapshot", "snapshot.json"];
+            args.extend(query);
+            args.extend(["--max-relationships", "20"]);
+            let error = Cli::try_parse_from(args).err().expect("bound needs a path");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
     }
 }
