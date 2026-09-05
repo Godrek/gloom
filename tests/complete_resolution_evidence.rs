@@ -1,11 +1,12 @@
 use gloom::app::Application;
 use gloom::{
-    CompletenessBasis, ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
-    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, PublishedSnapshot, Resolution,
+    CallableIdentityScope, CompletenessBasis, ContributedCallKind, ContributedCallSite,
+    ContributedCallSiteAttachment, ContributedCallSiteReference, ContributedCallable,
+    ContributedEvidence, ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim,
+    ContributorCallSiteId, ContributorCallableIdentity, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    PublishedSnapshot, Resolution,
 };
 use std::path::{Path, PathBuf};
 
@@ -53,6 +54,10 @@ fn basis() -> CompletenessBasis {
     }
 }
 
+fn callable_identity(value: &str) -> ContributorCallableIdentity {
+    ContributorCallableIdentity::new(value, CallableIdentityScope::LinkageNamespace).unwrap()
+}
+
 fn evidence(
     evidence_type: &str,
     scope: EvidenceScope,
@@ -80,7 +85,7 @@ fn callable(
     evidence_artifact: &str,
 ) -> ContributedCallable {
     ContributedCallable {
-        contributor_callable_id: contributor_callable_id.into(),
+        callable_identity: callable_identity(contributor_callable_id),
         display_name: contributor_callable_id.into(),
         defined: true,
         representation: "fixture-callable".into(),
@@ -114,7 +119,7 @@ fn call_site(
         Vec::new()
     } else {
         vec![ContributedTargetClaim {
-            target_callable_id: target_callable_id.into(),
+            target_callable_identity: callable_identity(target_callable_id),
             callee_display_name: target_callable_id.into(),
             target_representation: "fixture-callable".into(),
             observation_context_id: context.id.clone(),
@@ -131,7 +136,7 @@ fn call_site(
     ContributedCallSite {
         contributor_call_site_id: ContributorCallSiteId::new(format!("dispatch:{line}")).unwrap(),
         kind: ContributedCallKind::Indirect,
-        caller_callable_id: "dispatch".into(),
+        caller_callable_identity: callable_identity("dispatch"),
         line,
         observation_context_id: context.id.clone(),
         resolution: spec.resolution,
@@ -239,11 +244,11 @@ impl DispatchFixture {
                 call_site: ContributedCallSiteReference {
                     observation_context_id: traced_context.id.clone(),
                     acquired_input_fingerprint: FIXTURE_FINGERPRINT.into(),
-                    caller_callable_id: "dispatch".into(),
+                    caller_callable_identity: callable_identity("dispatch"),
                     contributor_call_site_id: ContributorCallSiteId::new("dispatch:2").unwrap(),
                 },
                 target_claims: vec![ContributedTargetClaim {
-                    target_callable_id: "attached_target".into(),
+                    target_callable_identity: callable_identity("attached_target"),
                     callee_display_name: "attached_target".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: traced_context.id.clone(),

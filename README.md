@@ -17,7 +17,11 @@ validates only a small part of that direction.
   stripped, names a callable the module declares: a function, an ifunc, or an
   alias that resolves to one. A call through a global variable, or through an
   alias to data, stays unresolved.
-- Merge definitions and declarations across inputs.
+- Preserve one linkage-namespace callable across definitions and declarations
+  in several acquired inputs of one observation context, while keeping
+  same-named translation-unit-local callables distinct — including two
+  byte-identical translation units, which link as two units and stay two
+  callables.
 - Detect recursive strongly connected components.
 - Query zero-incoming functions, reachability, and shortest call paths.
 - Export schema 1.0 JSON.
@@ -25,19 +29,28 @@ validates only a small part of that direction.
   highlighting, and caller/callee inspection.
 - Publish evidence-backed snapshots with first-class direct and indirect call
   sites, per-site complete/partial/absent resolution, and possible targets.
-- Query named callees without dropping unresolved sites, and expand compact
-  call-site explanation handles into evidence, target derivations, and
-  cross-context correspondence claims.
+- Run callable search, immediate caller and callee queries, and bounded shortest
+  call-path queries through one named-query seam without dropping unresolved
+  sites. Search results include the acquired input, scoped contributor identity,
+  and declaration behind each match so same-named local callables can be
+  selected by program-entity identity.
+- Expand compact call-site explanation handles into evidence, target
+  derivations, and cross-context correspondence claims.
 
 ## Prototype limitations
 
-The legacy schema 1.0 model uses LLVM symbol names as identities, merges all
-unresolved indirect calls into one placeholder, and treats all stored edges
-alike during traversal. The evidence-backed snapshot path preserves indirect
-call sites independently, but broader identity and query migration remains in
-progress. The legacy `call_count` is a count of merged static occurrences, not
-runtime invocations. Its zero-incoming function query is not a semantic
-entry-point analysis.
+The legacy schema 1.0 model gives callables stable opaque IDs derived from the
+LLVM contributor's scoped identity evidence; readable symbol spellings remain
+labels in exports and query results. It still merges all unresolved indirect
+calls into one placeholder and treats all stored relationships alike during
+traversal. The evidence-backed snapshot path preserves indirect call sites
+independently. Its current named caller/callee queries are one-hop and its
+shortest directed call path requires an explicit relationship bound (maximum
+1,000). They use the published call-graph projection's target claims across its
+contexts; context filters, resolution policies, and broader bounded-query
+policies remain deferred to the full named-query work. The legacy `call_count`
+is a count of merged static occurrences, not runtime invocations. Its
+zero-incoming function query is not a semantic entry-point analysis.
 
 Schema 1.0, the CLI, and the Rust library API are pre-stable prototype
 interfaces. They may change as the evidence and identity model is implemented;
@@ -94,18 +107,25 @@ Query the stored call-graph projection and expand the returned explanation
 handle without rerunning extraction or reconstructing the relationship:
 
 ```bash
+gloom query-snapshot snapshot.json --search-callables caller
 gloom query-snapshot snapshot.json --callees caller
 gloom query-snapshot snapshot.json --callees caller \
   --caller-entity-id entity:direct-call-example-v1:input:0:callable:0
+gloom query-snapshot snapshot.json --callers callee
+gloom query-snapshot snapshot.json --call-path caller callee \
+  --max-relationships 8
 gloom query-snapshot snapshot.json --explain \
   explanation:entity:direct-call-example-v1:input:0:call-site:0
 gloom view-snapshot snapshot.json -o snapshot.html
 ```
 
-Name-only callee queries reject ambiguous callable labels. Use the entity ID
-reported in the snapshot to select one caller explicitly.
+Name-only caller, callee, and path queries reject ambiguous callable labels,
+reporting each candidate's declaration. Use `--search-callables` or the entity
+ID reported in the snapshot to select the intended callable explicitly.
+Legacy `analyze --reachable` and `analyze --path` do the same; their results pair
+each opaque identity with its readable display label.
 
-The published snapshot format is currently `2.0-pre`. The existing `build`,
+The published snapshot format is currently `2.0-pre.1`. The existing `build`,
 `analyze`, and `view` commands continue to use the legacy schema 1.0 path during
 the migration.
 

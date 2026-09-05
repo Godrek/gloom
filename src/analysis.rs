@@ -101,9 +101,41 @@ pub fn entry_points(graph: &Graph) -> Vec<String> {
         .collect()
 }
 
+/// Resolves a selector a user typed to one callable's program-entity identity.
+///
+/// A display name is a label, so several callables may carry it: one private to
+/// its translation unit keeps an identity of its own in every unit that
+/// declares one. A selector that names an identity exactly selects that
+/// callable; otherwise it is matched against labels, and an ambiguous label is
+/// reported with the identities to choose from rather than resolved by picking
+/// one of them.
+pub fn resolve_callable_selector(graph: &Graph, selector: &str) -> Result<String, String> {
+    if graph
+        .nodes
+        .get(selector)
+        .is_some_and(|node| node.kind == "function")
+    {
+        return Ok(selector.to_owned());
+    }
+    let matched = graph
+        .nodes
+        .values()
+        .filter(|node| node.kind == "function" && node.label == selector)
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    match matched.as_slice() {
+        [] => Err(format!("unknown callable '{selector}'")),
+        [id] => Ok((*id).to_owned()),
+        several => Err(format!(
+            "function '{selector}' is ambiguous; select one of: {}",
+            several.join(", ")
+        )),
+    }
+}
+
 pub fn reachable(graph: &Graph, start: &str) -> Result<Vec<String>, String> {
     if !graph.nodes.contains_key(start) {
-        return Err(format!("unknown function '{start}'"));
+        return Err(format!("unknown callable '{start}'"));
     }
     let links = adjacency(graph);
     let mut seen = BTreeSet::from([start.to_owned()]);
@@ -122,7 +154,7 @@ pub fn reachable(graph: &Graph, start: &str) -> Result<Vec<String>, String> {
 pub fn shortest_path(graph: &Graph, start: &str, end: &str) -> Result<Option<Vec<String>>, String> {
     for name in [start, end] {
         if !graph.nodes.contains_key(name) {
-            return Err(format!("unknown function '{name}'"));
+            return Err(format!("unknown callable '{name}'"));
         }
     }
     let links = adjacency(graph);
@@ -163,7 +195,7 @@ mod tests {
     fn sample() -> Graph {
         let mut graph = Graph::default();
         for name in ["main", "a", "b", "leaf"] {
-            graph.add_node(Node::function(name, true, None));
+            graph.add_node(Node::callable(name, name, true, None));
         }
         for (source, target) in [("main", "a"), ("a", "b"), ("b", "a"), ("b", "leaf")] {
             graph.add_edge(source, target, "direct-call");

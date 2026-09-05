@@ -14,8 +14,8 @@
 
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind, PublishedSnapshot,
-    Resolution,
+    CallableSelector, EvidenceSupport, LlvmTextContributor, ObservationContext, ProgramEntityKind,
+    PublishedSnapshot, Resolution,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -129,7 +129,10 @@ fn a_callable_invented_by_a_target_claim_never_becomes_a_published_snapshot() {
                     "id": handler_manifestation,
                     "entity_id": handler_entity,
                     "acquired_input_id": input,
-                    "contributor_callable_id": "handler",
+                    "contributor_callable_identity": {
+                        "id": "llvm-symbol:handler",
+                        "scope": "linkage-namespace"
+                    },
                     "observation_context_id": context,
                     "representation": "llvm-function",
                     "defined": false,
@@ -377,11 +380,14 @@ fn a_call_through_a_global_variable_still_names_no_callable() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "global_variable_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("global_variable_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(
         result

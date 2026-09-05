@@ -1,11 +1,12 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    ContributedCallKind, ContributedCallSite, ContributedCallSiteAttachment,
-    ContributedCallSiteReference, ContributedCallable, ContributedEvidence,
-    ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    ObservationContext, ObservationContextId, ProgramEntityKind, PublishedSnapshot, Resolution,
+    CallableIdentityScope, CallableSelector, ContributedCallKind, ContributedCallSite,
+    ContributedCallSiteAttachment, ContributedCallSiteReference, ContributedCallable,
+    ContributedEvidence, ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim,
+    ContributorCallSiteId, ContributorCallableIdentity, ContributorIdentity,
+    EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability, EvidenceContribution,
+    EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor, ObservationContext,
+    ObservationContextId, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +60,10 @@ fn identity(name: &str) -> ContributorIdentity {
     }
 }
 
+fn callable_identity(value: &str) -> ContributorCallableIdentity {
+    ContributorCallableIdentity::new(value, CallableIdentityScope::LinkageNamespace).unwrap()
+}
+
 fn evidence(
     evidence_type: &str,
     scope: EvidenceScope,
@@ -87,7 +92,7 @@ fn callable(
     line: usize,
 ) -> ContributedCallable {
     ContributedCallable {
-        contributor_callable_id: name.into(),
+        callable_identity: callable_identity(name),
         display_name: name.into(),
         defined: true,
         representation: representation.into(),
@@ -112,7 +117,7 @@ fn target_claim(
     evidence: Vec<ContributedEvidence>,
 ) -> ContributedTargetClaim {
     ContributedTargetClaim {
-        target_callable_id: name.into(),
+        target_callable_identity: callable_identity(name),
         callee_display_name: name.into(),
         target_representation: representation.into(),
         observation_context_id: observation_context_id.clone(),
@@ -162,7 +167,7 @@ fn static_contribution(input: &Path, context: &ObservationContext) -> EvidenceCo
         call_sites: vec![ContributedCallSite {
             contributor_call_site_id: ContributorCallSiteId::new(CALL_SITE_IDENTITY).unwrap(),
             kind: ContributedCallKind::Indirect,
-            caller_callable_id: "dispatch".into(),
+            caller_callable_identity: callable_identity("dispatch"),
             line: CALL_SITE_LINE,
             observation_context_id: context.id.clone(),
             resolution: Resolution::Partial,
@@ -251,10 +256,10 @@ impl StaticAndTraceFixture {
                         TraceAttachment::UnknownAcquiredInput => "fixture:never-acquired".into(),
                         _ => STATIC_FINGERPRINT.into(),
                     },
-                    caller_callable_id: match self.attachment {
-                        TraceAttachment::MismatchedCaller => "first_target".into(),
-                        _ => "dispatch".into(),
-                    },
+                    caller_callable_identity: callable_identity(match self.attachment {
+                        TraceAttachment::MismatchedCaller => "first_target",
+                        _ => "dispatch",
+                    }),
                     contributor_call_site_id: match self.attachment {
                         TraceAttachment::UnknownCallSiteIdentity => {
                             ContributorCallSiteId::new("dispatch#9").unwrap()
@@ -386,7 +391,7 @@ impl EvidenceContributor for LlvmAndTraceFixture {
                 call_site: ContributedCallSiteReference {
                     observation_context_id: context.id.clone(),
                     acquired_input_fingerprint,
-                    caller_callable_id: self.caller_callable_id.into(),
+                    caller_callable_identity: callable_identity(self.caller_callable_id),
                     contributor_call_site_id: ContributorCallSiteId::new("llvm-call:0").unwrap(),
                 },
                 target_claims: vec![target_claim(
@@ -542,11 +547,14 @@ fn a_trace_acquired_later_attaches_targets_to_the_published_call_site() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
     assert_eq!(result.call_sites.len(), 1);
     let projected = &result.call_sites[0];
     assert_eq!(projected.call_site_id, call_sites[0].id);
@@ -626,11 +634,14 @@ fn explanations_show_static_and_runtime_provenance_side_by_side() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     let explanation = application
         .explain_snapshot(&snapshot, &result.call_sites[0].explanation_handle)
@@ -899,7 +910,7 @@ fn call_site_references_select_one_of_two_llvm_inputs_sharing_a_call_site_identi
                 PathBuf::from(TRACE_INPUT),
             ],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller"),
         )
         .unwrap();
 
@@ -925,11 +936,16 @@ fn call_site_references_select_one_of_two_llvm_inputs_sharing_a_call_site_identi
             .query_snapshot(
                 &snapshot,
                 NamedQuery::Callees {
-                    caller_name: caller.into(),
-                    caller_entity_id: None,
+                    caller: CallableSelector {
+                        label: Some(caller.into()),
+                        entity_id: None,
+                    },
                 },
             )
             .unwrap()
+            .call_relationships()
+            .unwrap()
+            .clone()
     };
     let second = callees("second_caller");
     assert_eq!(second.call_sites.len(), 1);
@@ -969,7 +985,7 @@ fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_reje
         .publish_snapshot(
             &[PathBuf::from(SECOND_LLVM_INPUT), PathBuf::from(TRACE_INPUT)],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller")
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller")
                 .with_unknown_acquired_input(),
         )
         .unwrap_err();
@@ -990,7 +1006,7 @@ fn call_site_references_to_unknown_or_indistinguishable_acquired_inputs_are_reje
                 PathBuf::from(TRACE_INPUT),
             ],
             publication_context(LlvmAndTraceFixture::NAME),
-            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "second_caller"),
+            &LlvmAndTraceFixture::new(SECOND_LLVM_INPUT, "llvm-symbol:second_caller"),
         )
         .unwrap_err();
     assert!(

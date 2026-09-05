@@ -3,7 +3,7 @@ use crate::contributor::EvidenceContributor;
 use crate::llvm;
 use crate::model::{Document, Graph};
 use crate::snapshot::{
-    Explanation, ExplanationHandle, NamedQueryResult, ObservationContext, ProgramEntityId,
+    CallableSelector, Explanation, ExplanationHandle, NamedQueryResult, ObservationContext,
     PublishedSnapshot,
 };
 use crate::viewer;
@@ -23,19 +23,35 @@ pub enum Query {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NamedQuery {
-    Callees {
-        caller_name: String,
-        caller_entity_id: Option<ProgramEntityId>,
+    CallableSearch {
+        label: String,
     },
+    Callees {
+        caller: CallableSelector,
+    },
+    Callers {
+        callee: CallableSelector,
+    },
+    CallPath {
+        start: CallableSelector,
+        end: CallableSelector,
+        max_relationships: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct QueryEntity {
+    pub entity_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum QueryResult {
     Summary(crate::model::AnalysisSummary),
-    PotentialRecursiveCycles(Vec<Vec<String>>),
-    Reachable(Vec<String>),
-    ShortestPath(Option<Vec<String>>),
+    PotentialRecursiveCycles(Vec<Vec<QueryEntity>>),
+    Reachable(Vec<QueryEntity>),
+    ShortestPath(Option<Vec<QueryEntity>>),
 }
 
 impl Application {
@@ -59,10 +75,24 @@ impl Application {
         query: NamedQuery,
     ) -> Result<NamedQueryResult, String> {
         match query {
-            NamedQuery::Callees {
-                caller_name,
-                caller_entity_id,
-            } => snapshot.query_callees(&caller_name, caller_entity_id.as_ref()),
+            NamedQuery::CallableSearch { label } => Ok(NamedQueryResult::CallableSearch(
+                snapshot.search_callables(&label),
+            )),
+            NamedQuery::Callees { caller } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callees(&caller)?,
+            )),
+            NamedQuery::Callers { callee } => Ok(NamedQueryResult::CallRelationships(
+                snapshot.query_callers(&callee)?,
+            )),
+            NamedQuery::CallPath {
+                start,
+                end,
+                max_relationships,
+            } => Ok(NamedQueryResult::CallPath(snapshot.query_call_path(
+                &start,
+                &end,
+                max_relationships,
+            )?)),
         }
     }
 
@@ -120,6 +150,20 @@ impl Application {
                 document.schema_version
             ));
         }
+        // Building the graph keys callables by identity, so a document holding
+        // one identity twice would silently coalesce two callables into one —
+        // exactly the merge this schema now exists to prevent. A repeated
+        // identity is a contradiction in the document, so it is reported rather
+        // than resolved.
+        let mut identities = std::collections::BTreeSet::new();
+        for node in &document.nodes {
+            if !identities.insert(node.id.as_str()) {
+                return Err(format!(
+                    "graph contains more than one entity identified as '{}'",
+                    node.id
+                ));
+            }
+        }
         Ok(document)
     }
 
@@ -127,14 +171,35 @@ impl Application {
         let graph = document.into_graph();
         Ok(match query {
             Query::Summary => QueryResult::Summary(analysis::summary(&graph)),
-            Query::PotentialRecursiveCycles => {
-                QueryResult::PotentialRecursiveCycles(analysis::cycles(&graph))
-            }
+            Query::PotentialRecursiveCycles => QueryResult::PotentialRecursiveCycles(
+                analysis::cycles(&graph)
+                    .into_iter()
+                    .map(|cycle| query_entities(&graph, cycle))
+                    .collect(),
+            ),
+            // A starting point is selected by identity. A user may type a
+            // display name, which is a label several callables can share, so it
+            // is resolved to one identity first and an ambiguous label is
+            // reported rather than resolved by picking a callable.
             Query::Reachable { start } => {
-                QueryResult::Reachable(analysis::reachable(&graph, &start)?)
+                let start = analysis::resolve_callable_selector(&graph, &start)?;
+                // Reachability answers with a set, so it is ordered for a
+                // reader: by the label shown, then by identity, which keeps two
+                // same-labelled callables adjacent and the order stable.
+                let mut reached = query_entities(&graph, analysis::reachable(&graph, &start)?);
+                reached.sort_by(|left, right| {
+                    (&left.display_name, &left.entity_id)
+                        .cmp(&(&right.display_name, &right.entity_id))
+                });
+                QueryResult::Reachable(reached)
             }
             Query::ShortestPath { start, end } => {
-                QueryResult::ShortestPath(analysis::shortest_path(&graph, &start, &end)?)
+                let start = analysis::resolve_callable_selector(&graph, &start)?;
+                let end = analysis::resolve_callable_selector(&graph, &end)?;
+                QueryResult::ShortestPath(
+                    analysis::shortest_path(&graph, &start, &end)?
+                        .map(|path| query_entities(&graph, path)),
+                )
             }
         })
     }
@@ -142,6 +207,22 @@ impl Application {
     pub fn render_viewer(&self, document: &Document) -> Result<String, String> {
         viewer::render_html(document)
     }
+}
+
+fn query_entities(graph: &Graph, entity_ids: Vec<String>) -> Vec<QueryEntity> {
+    entity_ids
+        .into_iter()
+        .map(|entity_id| {
+            let node = graph
+                .nodes
+                .get(&entity_id)
+                .expect("analysis results must name graph entities");
+            QueryEntity {
+                entity_id,
+                display_name: node.label.clone(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -165,7 +246,6 @@ mod tests {
         let document = application
             .build(&[PathBuf::from("tests/fixtures/simple.ll")], "clang", &[])
             .unwrap();
-
         let json = application.export_json(&document).unwrap();
         assert!(json.ends_with('\n'));
         let loaded = application.load_json(&json).unwrap();
@@ -180,6 +260,17 @@ mod tests {
         let document = application
             .build(&[PathBuf::from("tests/fixtures/simple.ll")], "clang", &[])
             .unwrap();
+        let query_entity = |display_name: &str| {
+            let node = document
+                .nodes
+                .iter()
+                .find(|node| node.label == display_name)
+                .unwrap();
+            serde_json::json!({
+                "entity_id": node.id,
+                "display_name": node.label,
+            })
+        };
 
         assert_eq!(
             serde_json::to_value(
@@ -188,7 +279,7 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!([["step"]])
+            serde_json::json!([[query_entity("step")]])
         );
         assert_eq!(
             serde_json::to_value(
@@ -202,7 +293,7 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!(["puts", "step"])
+            serde_json::json!([query_entity("puts"), query_entity("step")])
         );
         assert_eq!(
             serde_json::to_value(
@@ -217,7 +308,11 @@ mod tests {
                     .unwrap()
             )
             .unwrap(),
-            serde_json::json!(["main", "step", "puts"])
+            serde_json::json!([
+                query_entity("main"),
+                query_entity("step"),
+                query_entity("puts")
+            ])
         );
         assert_eq!(
             serde_json::to_value(application.query(document, Query::Summary).unwrap()).unwrap()["node_count"],

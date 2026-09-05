@@ -1,6 +1,7 @@
 use crate::snapshot::{
-    CompletenessBasis, EvidenceScope, EvidenceSupport, ObservationContext, ObservationContextId,
-    Resolution, check_completeness_declaration, misplaced_completeness_basis_error,
+    CompletenessBasis, ContributorCallableIdentity, EvidenceScope, EvidenceSupport,
+    ObservationContext, ObservationContextId, Resolution, check_completeness_declaration,
+    misplaced_completeness_basis_error,
 };
 use std::fmt;
 use std::path::Path;
@@ -35,10 +36,20 @@ use std::path::Path;
 ///   callable the contribution also declares: the target manifestation carries
 ///   contributor-identity evidence from the same acquired input and observation
 ///   context, and its representation is one of
-///   [`DECLARED_CALLABLE_REPRESENTATIONS`]. A contributor that
+///   `DECLARED_CALLABLE_REPRESENTATIONS`. A contributor that
 ///   reaches a callable only through a target claim, as an external `declare`
 ///   or an alias once did, must contribute it as a callable instead.
-pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "6";
+/// - `7`: every contributed callable and every target claim declares the
+///   [`crate::CallableIdentityScope`] its contributor callable identity means one
+///   callable within. A contributor that reads a callable which is not visible
+///   beyond the acquired input it was read from must scope its identity to
+///   that input, so that an identically spelled callable in another input can
+///   never carry the same identity. Display names remain labels and never
+///   serve as identities.
+/// - `8`: the opaque contributor callable ID and its scope travel as one
+///   validated [`ContributorCallableIdentity`], and the cross-input scope uses
+///   the canonical linkage-namespace vocabulary.
+pub const EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION: &str = "8";
 
 /// The target-evidence type that says a call instruction names its callee
 /// outright, rather than that the callee was observed among a call site's
@@ -114,7 +125,11 @@ pub struct ContributedInput {
 /// correspondence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedCallable {
-    pub contributor_callable_id: String,
+    /// The contributor's opaque identity and the boundary within which it means
+    /// one callable. A callable visible only inside this acquired input must be
+    /// scoped to it, so the core can hold same-named locals apart without ever
+    /// reading the identity itself.
+    pub callable_identity: ContributorCallableIdentity,
     pub display_name: String,
     pub defined: bool,
     pub representation: String,
@@ -192,7 +207,7 @@ pub struct ContributedCallSite {
     /// to this call site.
     pub contributor_call_site_id: ContributorCallSiteId,
     pub kind: ContributedCallKind,
-    pub caller_callable_id: String,
+    pub caller_callable_identity: ContributorCallableIdentity,
     pub line: usize,
     pub observation_context_id: ObservationContextId,
     pub resolution: Resolution,
@@ -215,7 +230,7 @@ pub struct ContributedCallSite {
 pub struct ContributedCallSiteReference {
     pub observation_context_id: ObservationContextId,
     pub acquired_input_fingerprint: String,
-    pub caller_callable_id: String,
+    pub caller_callable_identity: ContributorCallableIdentity,
     pub contributor_call_site_id: ContributorCallSiteId,
 }
 
@@ -231,7 +246,10 @@ pub struct ContributedCallSiteAttachment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributedTargetClaim {
-    pub target_callable_id: String,
+    /// The target's contributor identity on the same terms as
+    /// [`ContributedCallable::callable_identity`]. It must agree with the
+    /// identity the contribution declared for that callable.
+    pub target_callable_identity: ContributorCallableIdentity,
     pub callee_display_name: String,
     pub target_representation: String,
     pub observation_context_id: ObservationContextId,
@@ -340,10 +358,7 @@ impl EvidenceContribution {
         let artifact = self.input.evidence_artifact.as_str();
         let mut callable_identities = std::collections::BTreeSet::new();
         for callable in &self.callables {
-            if callable.contributor_callable_id.trim().is_empty()
-                || callable.display_name.is_empty()
-                || callable.representation.is_empty()
-            {
+            if callable.display_name.is_empty() || callable.representation.is_empty() {
                 return Err(
                     "contributed callable identities, names, and representations cannot be empty"
                         .into(),
@@ -358,7 +373,7 @@ impl EvidenceContribution {
             if callable.line == 0 {
                 return Err(format!(
                     "contributed callable '{}' has no identity-evidence line",
-                    callable.contributor_callable_id
+                    callable.callable_identity
                 ));
             }
             callable.identity_evidence.validate(
@@ -375,23 +390,23 @@ impl EvidenceContribution {
                 return Err(format!(
                     "contributed identity evidence at line {} does not locate callable '{}' at line {}",
                     callable.identity_evidence.location.line,
-                    callable.contributor_callable_id,
+                    callable.callable_identity,
                     callable.line
                 ));
             }
             if !callable_identities.insert((
                 callable.observation_context_id.as_str(),
-                callable.contributor_callable_id.as_str(),
+                &callable.callable_identity,
             )) {
                 return Err(format!(
                     "contributed callable identity '{}' has duplicate contributions in observation context '{}'",
-                    callable.contributor_callable_id, callable.observation_context_id
+                    callable.callable_identity, callable.observation_context_id
                 ));
             }
         }
         let mut call_site_identities = std::collections::BTreeSet::new();
         for call_site in &self.call_sites {
-            if call_site.caller_callable_id.trim().is_empty() || call_site.line == 0 {
+            if call_site.line == 0 {
                 return Err("contributed call-site evidence is not fully qualified".into());
             }
             if !call_site_identities.insert((
@@ -438,11 +453,11 @@ impl EvidenceContribution {
             }
             if !callable_identities.contains(&(
                 call_site.observation_context_id.as_str(),
-                call_site.caller_callable_id.as_str(),
+                &call_site.caller_callable_identity,
             )) {
                 return Err(format!(
                     "contributed call site references unknown caller identity '{}' in observation context '{}'",
-                    call_site.caller_callable_id, call_site.observation_context_id
+                    call_site.caller_callable_identity, call_site.observation_context_id
                 ));
             }
             let contextual_target_count = call_site
@@ -478,9 +493,7 @@ impl EvidenceContribution {
         }
         for attachment in &self.call_site_attachments {
             let reference = &attachment.call_site;
-            if reference.caller_callable_id.trim().is_empty()
-                || reference.acquired_input_fingerprint.trim().is_empty()
-            {
+            if reference.acquired_input_fingerprint.trim().is_empty() {
                 return Err("contributed call-site attachment does not identify the call site it attaches to".into());
             }
             if !context_ids.contains(reference.observation_context_id.as_str()) {
@@ -509,8 +522,7 @@ fn validate_target_claim(
     contexts_by_id: &std::collections::BTreeMap<&str, &ObservationContext>,
     evidence_artifact: &str,
 ) -> Result<(), String> {
-    if target.target_callable_id.trim().is_empty()
-        || target.callee_display_name.is_empty()
+    if target.callee_display_name.is_empty()
         || target.target_representation.is_empty()
         || target.evidence.is_empty()
     {
@@ -594,6 +606,11 @@ pub(crate) fn fingerprint_parts(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::CallableIdentityScope;
+
+    fn callable_identity(value: &str) -> ContributorCallableIdentity {
+        ContributorCallableIdentity::new(value, CallableIdentityScope::LinkageNamespace).unwrap()
+    }
 
     #[test]
     fn fingerprint_uses_fixed_width_length_prefixes() {
@@ -622,7 +639,7 @@ mod tests {
             },
             observation_contexts: vec![context.clone()],
             callables: vec![ContributedCallable {
-                contributor_callable_id: "caller".into(),
+                callable_identity: callable_identity("caller"),
                 display_name: "caller".into(),
                 defined: true,
                 representation: "fixture-callable".into(),
@@ -642,7 +659,7 @@ mod tests {
             call_sites: vec![ContributedCallSite {
                 contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Direct,
-                caller_callable_id: "caller".into(),
+                caller_callable_identity: callable_identity("caller"),
                 line: 1,
                 observation_context_id: context.id.clone(),
                 resolution: Resolution::Complete,
@@ -660,7 +677,7 @@ mod tests {
                     },
                 },
                 target_claims: vec![ContributedTargetClaim {
-                    target_callable_id: "callee".into(),
+                    target_callable_identity: callable_identity("callee"),
                     callee_display_name: "callee".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),
@@ -698,6 +715,37 @@ mod tests {
         );
         for rejected in ["", "   ", " llvm-call:0", "llvm-call:0\n"] {
             let error = ContributorCallSiteId::new(rejected).unwrap_err();
+            assert!(
+                error.contains("must be non-empty and free of surrounding whitespace"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn contributor_callable_identity_owns_and_validates_its_scope() {
+        let identity = ContributorCallableIdentity::new(
+            "fixture:callable:7",
+            CallableIdentityScope::LinkageNamespace,
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&identity).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "id": "fixture:callable:7",
+                "scope": "linkage-namespace"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ContributorCallableIdentity>(encoded).unwrap(),
+            identity
+        );
+
+        for rejected in ["", " fixture:callable:7", "fixture:callable:7\n"] {
+            let error =
+                ContributorCallableIdentity::new(rejected, CallableIdentityScope::AcquiredInput)
+                    .unwrap_err();
             assert!(
                 error.contains("must be non-empty and free of surrounding whitespace"),
                 "unexpected error: {error}"

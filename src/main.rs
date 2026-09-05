@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
+use gloom::CallableSelector;
 use gloom::app::{Application, NamedQuery, Query};
-use gloom::{LlvmTextContributor, ObservationContext};
+use gloom::{LlvmTextContributor, ObservationContext, ProgramEntityId, PublishedSnapshot};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,14 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
+
+/// The flags belonging to each `query-snapshot` query kind. A kind is chosen by
+/// any of its flags — a display name is a label, so an entity ID selects on its
+/// own — and kinds exclude one another.
+const CALLEES_KIND: &[&str] = &["callees", "caller_entity_id"];
+const CALLERS_KIND: &[&str] = &["callers", "callee_entity_id"];
+const CALL_PATH_KIND: &[&str] = &["call_path", "start_entity_id", "end_entity_id"];
+const EXPLAIN_KIND: &[&str] = &["explain"];
 
 #[derive(Subcommand)]
 enum Commands {
@@ -70,13 +79,39 @@ enum Commands {
         clang_flags: Vec<String>,
     },
     /// Run a named query or expand an explanation from a published snapshot.
+    ///
+    /// A callable is selected by display name, by program-entity ID, or by
+    /// both: the name is a label, so an ID alone is enough, and a name alone is
+    /// enough when it is unambiguous.
+    #[command(group(clap::ArgGroup::new("path_selection").args(CALL_PATH_KIND.iter().copied()).multiple(true)))]
     QuerySnapshot {
         snapshot: PathBuf,
-        #[arg(long, conflicts_with = "explain", required_unless_present = "explain")]
+        /// Find callable entities whose display name contains LABEL, with the
+        /// acquired input and declaration that tell same-named callables apart.
+        #[arg(long, value_name = "LABEL", conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).chain(CALL_PATH_KIND).chain(EXPLAIN_KIND).collect::<Vec<_>>())]
+        search_callables: Option<String>,
+        #[arg(long, value_name = "NAME")]
         callees: Option<String>,
-        #[arg(long, requires = "callees", conflicts_with = "explain")]
+        #[arg(long, value_name = "ID")]
         caller_entity_id: Option<String>,
-        #[arg(long, conflicts_with = "callees", required_unless_present = "callees")]
+        #[arg(long, value_name = "NAME", conflicts_with_all = CALLEES_KIND)]
+        callers: Option<String>,
+        #[arg(long, value_name = "ID", conflicts_with_all = CALLEES_KIND)]
+        callee_entity_id: Option<String>,
+        #[arg(
+            long = "call-path",
+            num_args = 2,
+            value_names = ["FROM", "TO"],
+            conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).collect::<Vec<_>>()
+        )]
+        call_path: Option<Vec<String>>,
+        #[arg(long, value_name = "ID", conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).collect::<Vec<_>>())]
+        start_entity_id: Option<String>,
+        #[arg(long, value_name = "ID", conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).collect::<Vec<_>>())]
+        end_entity_id: Option<String>,
+        #[arg(long, requires = "path_selection")]
+        max_relationships: Option<usize>,
+        #[arg(long, conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).chain(CALL_PATH_KIND).collect::<Vec<_>>())]
         explain: Option<String>,
     },
     /// Render a published snapshot as a self-contained evidence viewer.
@@ -94,6 +129,39 @@ fn read(path: &Path) -> Result<String, String> {
 
 fn write(path: &Path, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn snapshot_entity_id(
+    snapshot: &PublishedSnapshot,
+    requested_id: Option<String>,
+    role: &str,
+) -> Result<Option<ProgramEntityId>, String> {
+    requested_id
+        .map(|requested_id| {
+            snapshot
+                .program_entities()
+                .iter()
+                .find(|entity| entity.id.as_str() == requested_id)
+                .map(|entity| entity.id.clone())
+                .ok_or_else(|| format!("unknown {role} entity '{requested_id}'"))
+        })
+        .transpose()
+}
+
+/// Builds the selector a named query is given from what the user typed.
+///
+/// Either half selects: a display name is a label, so an entity ID needs no
+/// name beside it, and a name needs no ID when it is unambiguous.
+fn selector(
+    published: &gloom::PublishedSnapshot,
+    label: Option<String>,
+    entity_id: Option<String>,
+    role: &str,
+) -> Result<CallableSelector, String> {
+    Ok(CallableSelector {
+        label,
+        entity_id: snapshot_entity_id(published, entity_id, role)?,
+    })
 }
 
 fn run() -> Result<(), String> {
@@ -189,29 +257,52 @@ fn run() -> Result<(), String> {
         }
         Commands::QuerySnapshot {
             snapshot,
+            search_callables,
             callees,
             caller_entity_id,
+            callers,
+            callee_entity_id,
+            call_path,
+            start_entity_id,
+            end_entity_id,
+            max_relationships,
             explain,
         } => {
             let published = application
                 .load_snapshot_json(&read(&snapshot)?)
                 .map_err(|error| format!("{}: {error}", snapshot.display()))?;
-            let value = if let Some(caller_name) = callees {
-                let caller_entity_id = caller_entity_id
-                    .map(|requested_id| {
-                        published
-                            .program_entities()
-                            .iter()
-                            .find(|entity| entity.id.as_str() == requested_id)
-                            .map(|entity| entity.id.clone())
-                            .ok_or_else(|| format!("unknown caller entity '{requested_id}'"))
-                    })
-                    .transpose()?;
+            let value = if let Some(label) = search_callables {
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::CallableSearch { label },
+                )?)
+            } else if callees.is_some() || caller_entity_id.is_some() {
                 serde_json::to_value(application.query_snapshot(
                     &published,
                     NamedQuery::Callees {
-                        caller_name,
-                        caller_entity_id,
+                        caller: selector(&published, callees, caller_entity_id, "caller")?,
+                    },
+                )?)
+            } else if callers.is_some() || callee_entity_id.is_some() {
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::Callers {
+                        callee: selector(&published, callers, callee_entity_id, "callee")?,
+                    },
+                )?)
+            } else if call_path.is_some() || start_entity_id.is_some() || end_entity_id.is_some() {
+                let points = call_path.unwrap_or_default();
+                serde_json::to_value(application.query_snapshot(
+                    &published,
+                    NamedQuery::CallPath {
+                        start: selector(
+                            &published,
+                            points.first().cloned(),
+                            start_entity_id,
+                            "start",
+                        )?,
+                        end: selector(&published, points.get(1).cloned(), end_entity_id, "end")?,
+                        max_relationships: max_relationships.unwrap_or(8),
                     },
                 )?)
             } else if let Some(handle) = explain {
@@ -224,7 +315,10 @@ fn run() -> Result<(), String> {
                     .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
                 serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
             } else {
-                unreachable!("clap requires either --callees or --explain")
+                return Err(
+                    "select a query: --search-callables, --callees, --callers, --call-path, or --explain"
+                        .into(),
+                );
             }
             .map_err(|error| error.to_string())?;
             println!(
@@ -247,5 +341,88 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("gloom: error: {error}");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_path_bound_accepts_entity_ids_without_labels() {
+        let cli = Cli::try_parse_from([
+            "gloom",
+            "query-snapshot",
+            "snapshot.json",
+            "--start-entity-id",
+            "entity:start",
+            "--end-entity-id",
+            "entity:end",
+            "--max-relationships",
+            "20",
+        ])
+        .unwrap();
+        let Commands::QuerySnapshot {
+            call_path,
+            start_entity_id,
+            end_entity_id,
+            max_relationships,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a snapshot query");
+        };
+        assert_eq!(call_path, None);
+        assert_eq!(start_entity_id.as_deref(), Some("entity:start"));
+        assert_eq!(end_entity_id.as_deref(), Some("entity:end"));
+        assert_eq!(max_relationships, Some(20));
+    }
+
+    #[test]
+    fn call_path_bound_accepts_labels_with_entity_ids() {
+        let cli = Cli::try_parse_from([
+            "gloom",
+            "query-snapshot",
+            "snapshot.json",
+            "--call-path",
+            "helper",
+            "helper",
+            "--start-entity-id",
+            "entity:start",
+            "--end-entity-id",
+            "entity:end",
+            "--max-relationships",
+            "20",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::QuerySnapshot {
+                max_relationships: Some(20),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn call_path_bound_requires_a_path_query() {
+        for query in [
+            Vec::<&str>::new(),
+            vec!["--search-callables", "helper"],
+            vec!["--callees", "main"],
+            vec!["--caller-entity-id", "entity:caller"],
+            vec!["--callers", "helper"],
+            vec!["--callee-entity-id", "entity:callee"],
+            vec!["--explain", "explanation:call"],
+        ] {
+            let mut args = vec!["gloom", "query-snapshot", "snapshot.json"];
+            args.extend(query);
+            args.extend(["--max-relationships", "20"]);
+            let error = Cli::try_parse_from(args).err().expect("bound needs a path");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
     }
 }

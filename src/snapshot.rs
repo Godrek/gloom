@@ -4,10 +4,10 @@ use crate::contributor::{
     fingerprint_parts,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-pub const SNAPSHOT_SCHEMA_VERSION: &str = "2.0-pre";
+pub const SNAPSHOT_SCHEMA_VERSION: &str = "2.0-pre.1";
 
 macro_rules! identity_type {
     ($name:ident) => {
@@ -225,12 +225,96 @@ pub struct ProgramEntity {
     pub source_location: Option<SourceLocation>,
 }
 
+/// The boundary within which one contributor callable identity means one
+/// callable.
+///
+/// Linkage decides sameness, not spelling. A callable that is not visible
+/// beyond the acquired input it was read from — an LLVM `internal` or
+/// `private` function — is identified within that input, so two such callables
+/// in different inputs are different callables however they are spelled. A
+/// callable the link can see is identified in the namespace the link joins it
+/// by, so one identity may manifest in several acquired inputs.
+///
+/// The core never parses a contributor callable identity, so a declared scope
+/// is what lets it check that an input-scoped identity never spans acquired
+/// inputs.
+///
+/// The namespace a [`Self::LinkageNamespace`] identity is joined in is the
+/// observation context's, and nothing wider: a context names one build target,
+/// so its acquired inputs are the ones contributing to that artifact, and
+/// aggregation is keyed by context and therefore never crosses one. Across
+/// contexts the manifestations stay separate entities related by a
+/// correspondence claim, as ADR 0002 requires. That the declared inputs really
+/// do contribute to the declared target is the acquisition evidence issues #2
+/// and #3 own; here it is the observation context's declaration, as every other
+/// claim bounded by that context is.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallableIdentityScope {
+    AcquiredInput,
+    LinkageNamespace,
+}
+
+/// The opaque identity an evidence contributor asserts for one callable,
+/// together with the scope in which that assertion means one callable.
+///
+/// Keeping the two values together makes an identity impossible to pass through
+/// contributor, evidence-source, and publication code with a different scope
+/// by mistake. The core never parses `id`; only the contributor's explicit
+/// scope controls whether the identity may join acquired inputs.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "UncheckedContributorCallableIdentity")]
+pub struct ContributorCallableIdentity {
+    id: String,
+    scope: CallableIdentityScope,
+}
+
+#[derive(Deserialize)]
+struct UncheckedContributorCallableIdentity {
+    id: String,
+    scope: CallableIdentityScope,
+}
+
+impl TryFrom<UncheckedContributorCallableIdentity> for ContributorCallableIdentity {
+    type Error = String;
+
+    fn try_from(identity: UncheckedContributorCallableIdentity) -> Result<Self, Self::Error> {
+        Self::new(identity.id, identity.scope)
+    }
+}
+
+impl ContributorCallableIdentity {
+    pub fn new(id: impl Into<String>, scope: CallableIdentityScope) -> Result<Self, String> {
+        let id = id.into();
+        if id.is_empty() || id.trim() != id {
+            return Err(format!(
+                "contributor callable identity {id:?} must be non-empty and free of surrounding whitespace"
+            ));
+        }
+        Ok(Self { id, scope })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.id
+    }
+
+    pub fn scope(&self) -> CallableIdentityScope {
+        self.scope
+    }
+}
+
+impl fmt::Display for ContributorCallableIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.id.fmt(formatter)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Manifestation {
     pub id: ManifestationId,
     pub entity_id: ProgramEntityId,
     pub acquired_input_id: AcquiredInputId,
-    pub contributor_callable_id: String,
+    pub contributor_callable_identity: ContributorCallableIdentity,
     pub observation_context_id: ObservationContextId,
     pub representation: String,
     pub defined: bool,
@@ -406,7 +490,7 @@ pub struct CorrespondenceClaim {
     pub id: CorrespondenceClaimId,
     pub rule: String,
     pub acquired_input_id: AcquiredInputId,
-    pub contributor_callable_id: String,
+    pub contributor_callable_identity: ContributorCallableIdentity,
     pub manifestation_ids: Vec<ManifestationId>,
     pub evidence_ids: Vec<EvidenceId>,
 }
@@ -482,15 +566,143 @@ pub struct Explanation {
     pub derivations: Vec<Derivation>,
 }
 
+/// Where an evidence contributor read the declaration a callable manifestation
+/// was asserted from.
+///
+/// A callable entity carries no source location, because its evidence does not
+/// preserve one for the entity itself; the contributor-identity evidence that
+/// declared one of its manifestations does, and that is what a searcher needs
+/// to tell two callables spelled the same way apart.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct NamedQueryResult {
+pub struct CallableDeclaration {
+    pub evidence_id: EvidenceId,
+    pub source_location: SourceLocation,
+}
+
+/// One manifestation of a matched callable, with the acquired input it was read
+/// from and the declaration it was read at.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchedCallableManifestation {
+    pub manifestation_id: ManifestationId,
+    pub contributor_callable_identity: ContributorCallableIdentity,
+    pub acquired_input_id: AcquiredInputId,
+    pub acquired_input_path: String,
+    pub observation_context_id: ObservationContextId,
+    pub representation: String,
+    pub defined: bool,
+    /// Absent for a manifestation no contribution declared, one a target claim
+    /// introduced by naming it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<CallableDeclaration>,
+}
+
+/// One callable a search matched.
+///
+/// The label is what matched; the identity is `entity_id`, and the
+/// manifestations are what tell this callable from another the search matched
+/// under the same label.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchedCallable {
+    pub entity_id: ProgramEntityId,
+    pub display_name: String,
+    pub manifestations: Vec<SearchedCallableManifestation>,
+}
+
+/// How a named query names the callable it is about.
+///
+/// A display name is a label, so it is never required: an entity identity
+/// selects on its own, and a label selects only when it names exactly one
+/// callable. Supplying both checks them against each other.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CallableSelector {
+    pub label: Option<String>,
+    pub entity_id: Option<ProgramEntityId>,
+}
+
+impl CallableSelector {
+    pub fn by_label(label: impl Into<String>) -> Self {
+        Self {
+            label: Some(label.into()),
+            entity_id: None,
+        }
+    }
+
+    pub fn by_entity_id(entity_id: ProgramEntityId) -> Self {
+        Self {
+            label: None,
+            entity_id: Some(entity_id),
+        }
+    }
+
+    pub fn with_entity_id(mut self, entity_id: Option<ProgramEntityId>) -> Self {
+        self.entity_id = entity_id;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CallableSearchResult {
     pub query_name: String,
     pub program_snapshot_id: ProgramSnapshotId,
-    pub caller_entity_id: ProgramEntityId,
-    pub caller_observation_context_id: ObservationContextId,
+    pub label: String,
+    pub callables: Vec<SearchedCallable>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CallRelationshipsResult {
+    pub query_name: String,
+    pub program_snapshot_id: ProgramSnapshotId,
+    pub selected_callable_entity_id: ProgramEntityId,
+    pub selected_callable_observation_context_id: ObservationContextId,
     pub correspondence_claims: Vec<CorrespondenceClaim>,
     pub relationships: Vec<CallRelationship>,
     pub call_sites: Vec<ProjectedCallSite>,
+}
+
+/// The bounded shortest call path returned by the `call-path` named query.
+/// Every item is an existing projected relationship and therefore carries its
+/// target claim, call-site identity, resolution, and explanation handle.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CallPathResult {
+    pub query_name: String,
+    pub program_snapshot_id: ProgramSnapshotId,
+    pub start_entity_id: ProgramEntityId,
+    pub end_entity_id: ProgramEntityId,
+    pub max_relationships: usize,
+    pub correspondence_claims: Vec<CorrespondenceClaim>,
+    pub path: Option<Vec<CallRelationship>>,
+}
+
+/// Results from the shared snapshot named-query seam.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NamedQueryResult {
+    CallableSearch(CallableSearchResult),
+    CallRelationships(CallRelationshipsResult),
+    CallPath(CallPathResult),
+}
+
+impl NamedQueryResult {
+    pub fn callable_search(&self) -> Option<&CallableSearchResult> {
+        match self {
+            Self::CallableSearch(result) => Some(result),
+            Self::CallRelationships(_) | Self::CallPath(_) => None,
+        }
+    }
+
+    pub fn call_relationships(&self) -> Option<&CallRelationshipsResult> {
+        match self {
+            Self::CallRelationships(result) => Some(result),
+            Self::CallableSearch(_) | Self::CallPath(_) => None,
+        }
+    }
+
+    pub fn call_path(&self) -> Option<&CallPathResult> {
+        match self {
+            Self::CallPath(result) => Some(result),
+            Self::CallableSearch(_) | Self::CallRelationships(_) => None,
+        }
+    }
 }
 
 /// An immutable program snapshot made available for queries.
@@ -644,50 +856,205 @@ impl PublishedSnapshot {
         &self.call_graph_projection
     }
 
-    pub(crate) fn query_callees(
+    /// Finds the callable entities whose display name contains `label`.
+    ///
+    /// A display name is a label, not an identity, so a search matches labels
+    /// and answers with identities: every match carries its entity identity and
+    /// one entry per manifestation naming the acquired input it was read from
+    /// and the declaration it was read at. That is what lets a user choose
+    /// between two translation-unit-local callables spelled the same way. A
+    /// search that matches nothing is an empty result, not an error: absence in
+    /// an open-world projection means only that nothing matched.
+    pub(crate) fn search_callables(&self, label: &str) -> CallableSearchResult {
+        CallableSearchResult {
+            query_name: "callable-search".into(),
+            program_snapshot_id: self.program_snapshot.id.clone(),
+            label: label.into(),
+            callables: self
+                .program_entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == ProgramEntityKind::Callable
+                        && entity.display_name.contains(label)
+                })
+                .map(|entity| self.searched_callable(entity))
+                .collect(),
+        }
+    }
+
+    fn searched_callable(&self, entity: &ProgramEntity) -> SearchedCallable {
+        SearchedCallable {
+            entity_id: entity.id.clone(),
+            display_name: entity.display_name.clone(),
+            manifestations: self
+                .manifestations
+                .iter()
+                .filter(|manifestation| manifestation.entity_id == entity.id)
+                .map(|manifestation| {
+                    let acquired_input = self
+                        .acquired_inputs
+                        .iter()
+                        .find(|input| input.id == manifestation.acquired_input_id)
+                        .expect("validated manifestation must name an acquired input");
+                    SearchedCallableManifestation {
+                        manifestation_id: manifestation.id.clone(),
+                        contributor_callable_identity: manifestation
+                            .contributor_callable_identity
+                            .clone(),
+                        acquired_input_id: manifestation.acquired_input_id.clone(),
+                        acquired_input_path: acquired_input.path.clone(),
+                        observation_context_id: manifestation.observation_context_id.clone(),
+                        representation: manifestation.representation.clone(),
+                        defined: manifestation.defined,
+                        declaration: self.callable_declaration(&manifestation.id),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn callable_declaration(
         &self,
-        caller_name: &str,
-        caller_entity_id: Option<&ProgramEntityId>,
-    ) -> Result<NamedQueryResult, String> {
+        manifestation_id: &ManifestationId,
+    ) -> Option<CallableDeclaration> {
+        self.evidence_records
+            .iter()
+            .find(|evidence| {
+                evidence.support == EvidenceSupport::ContributorIdentity
+                    && evidence
+                        .related_manifestation_ids
+                        .contains(manifestation_id)
+            })
+            .map(|evidence| CallableDeclaration {
+                evidence_id: evidence.id.clone(),
+                source_location: evidence.source_location.clone(),
+            })
+    }
+
+    /// How one ambiguous candidate is offered to a user: its identity, the
+    /// acquired input it was read from, and where it was declared. Two
+    /// callables spelled the same way are told apart here rather than by
+    /// asking the user to guess from bare identities.
+    fn callable_selection_hint(&self, entity: &ProgramEntity) -> String {
+        let described = self
+            .searched_callable(entity)
+            .manifestations
+            .into_iter()
+            .map(|manifestation| match manifestation.declaration {
+                // The evidence artifact is the acquired input's own path for a
+                // textual input and a generated artifact for a compiled one, so
+                // it is named only when it says something the path does not.
+                Some(declaration)
+                    if declaration.source_location.artifact
+                        == manifestation.acquired_input_path =>
+                {
+                    format!(
+                        "declared at {}:{}",
+                        manifestation.acquired_input_path, declaration.source_location.line
+                    )
+                }
+                Some(declaration) => format!(
+                    "acquired from {}, declared at {}:{}",
+                    manifestation.acquired_input_path,
+                    declaration.source_location.artifact,
+                    declaration.source_location.line
+                ),
+                None => format!("acquired from {}", manifestation.acquired_input_path),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{} ({described})", entity.id)
+    }
+
+    /// Resolves the callable a query is about.
+    ///
+    /// An entity identity selects on its own, because it *is* the identity: a
+    /// query that carries one never needs the label too. A label given
+    /// alongside it is checked rather than ignored, so a stale label is
+    /// reported instead of silently answering about something else. A label
+    /// alone selects only when it names exactly one callable.
+    fn select_callable(
+        &self,
+        selector: &CallableSelector,
+        role: &str,
+    ) -> Result<&ProgramEntity, String> {
+        if let Some(entity_id) = &selector.entity_id {
+            let entity = self
+                .program_entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == ProgramEntityKind::Callable && entity.id == *entity_id
+                })
+                .ok_or_else(|| format!("unknown callable entity '{entity_id}'"))?;
+            if let Some(label) = &selector.label
+                && entity.display_name != *label
+            {
+                return Err(format!(
+                    "callable entity '{entity_id}' is labelled '{}', not '{label}'",
+                    entity.display_name
+                ));
+            }
+            return Ok(entity);
+        }
+        let Some(display_name) = selector.label.as_deref() else {
+            return Err(format!(
+                "a {role} callable must be selected by entity ID or display name"
+            ));
+        };
         let candidates = self
             .program_entities
             .iter()
             .filter(|entity| {
-                entity.kind == ProgramEntityKind::Callable && entity.display_name == caller_name
+                entity.kind == ProgramEntityKind::Callable && entity.display_name == display_name
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return Err(format!("unknown callable '{caller_name}'"));
+            return Err(format!("unknown callable '{display_name}'"));
         }
-        let caller = if let Some(caller_entity_id) = caller_entity_id {
-            candidates
-                .iter()
-                .copied()
-                .find(|candidate| candidate.id == *caller_entity_id)
-                .ok_or_else(|| {
-                    format!(
-                        "callable entity '{caller_entity_id}' does not identify callable '{caller_name}'"
-                    )
-                })?
-        } else if candidates.len() == 1 {
-            candidates[0]
+        if candidates.len() == 1 {
+            Ok(candidates[0])
         } else {
             let candidate_ids = candidates
                 .iter()
-                .map(|candidate| candidate.id.as_str())
+                .map(|candidate| self.callable_selection_hint(candidate))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!(
-                "callable '{caller_name}' is ambiguous; select a caller entity ID from: {candidate_ids}"
-            ));
-        };
-        let caller_observation_context_id = self
-            .manifestations
+            Err(format!(
+                "callable '{display_name}' is ambiguous; select a {role} entity ID from: {candidate_ids}"
+            ))
+        }
+    }
+
+    fn callable_observation_context_id(&self, callable: &ProgramEntity) -> ObservationContextId {
+        self.manifestations
             .iter()
-            .find(|manifestation| manifestation.entity_id == caller.id)
+            .find(|manifestation| manifestation.entity_id == callable.id)
             .expect("validated callable must have a manifestation")
             .observation_context_id
-            .clone();
+            .clone()
+    }
+
+    fn correspondence_claims_for_relationships(
+        &self,
+        relationships: &[CallRelationship],
+    ) -> Vec<CorrespondenceClaim> {
+        let correspondence_ids = relationships
+            .iter()
+            .flat_map(|relationship| &relationship.correspondence_claim_ids)
+            .map(CorrespondenceClaimId::as_str)
+            .collect::<BTreeSet<_>>();
+        self.correspondence_claims
+            .iter()
+            .filter(|claim| correspondence_ids.contains(claim.id.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn query_callees(
+        &self,
+        caller: &CallableSelector,
+    ) -> Result<CallRelationshipsResult, String> {
+        let caller = self.select_callable(caller, "caller")?;
         let relationships = self
             .call_graph_projection
             .relationships
@@ -702,25 +1069,101 @@ impl PublishedSnapshot {
             .filter(|call_site| call_site.caller_entity_id == caller.id)
             .cloned()
             .collect::<Vec<_>>();
-        let correspondence_ids = call_sites
-            .iter()
-            .flat_map(|site| &site.targets)
-            .flat_map(|target| &target.correspondence_claim_ids)
-            .map(CorrespondenceClaimId::as_str)
-            .collect::<BTreeSet<_>>();
-        Ok(NamedQueryResult {
+        Ok(CallRelationshipsResult {
             query_name: "callees".into(),
             program_snapshot_id: self.program_snapshot.id.clone(),
-            caller_entity_id: caller.id.clone(),
-            caller_observation_context_id,
-            correspondence_claims: self
-                .correspondence_claims
-                .iter()
-                .filter(|claim| correspondence_ids.contains(claim.id.as_str()))
-                .cloned()
-                .collect(),
+            selected_callable_entity_id: caller.id.clone(),
+            selected_callable_observation_context_id: self.callable_observation_context_id(caller),
+            correspondence_claims: self.correspondence_claims_for_relationships(&relationships),
             relationships,
             call_sites,
+        })
+    }
+
+    pub(crate) fn query_callers(
+        &self,
+        callee: &CallableSelector,
+    ) -> Result<CallRelationshipsResult, String> {
+        let callee = self.select_callable(callee, "callee")?;
+        let relationships = self
+            .call_graph_projection
+            .relationships
+            .iter()
+            .filter(|relationship| relationship.callee_entity_id == callee.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let call_site_ids = relationships
+            .iter()
+            .map(|relationship| relationship.call_site_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let call_sites = self
+            .call_graph_projection
+            .call_sites
+            .iter()
+            .filter(|call_site| call_site_ids.contains(call_site.call_site_id.as_str()))
+            .cloned()
+            .collect();
+        Ok(CallRelationshipsResult {
+            query_name: "callers".into(),
+            program_snapshot_id: self.program_snapshot.id.clone(),
+            selected_callable_entity_id: callee.id.clone(),
+            selected_callable_observation_context_id: self.callable_observation_context_id(callee),
+            correspondence_claims: self.correspondence_claims_for_relationships(&relationships),
+            relationships,
+            call_sites,
+        })
+    }
+
+    pub(crate) fn query_call_path(
+        &self,
+        start_selector: &CallableSelector,
+        end_selector: &CallableSelector,
+        max_relationships: usize,
+    ) -> Result<CallPathResult, String> {
+        const MAX_SUPPORTED_RELATIONSHIPS: usize = 1_000;
+        if !(1..=MAX_SUPPORTED_RELATIONSHIPS).contains(&max_relationships) {
+            return Err(format!(
+                "call-path max relationships must be between 1 and {MAX_SUPPORTED_RELATIONSHIPS}"
+            ));
+        }
+        let start = self.select_callable(start_selector, "start")?;
+        let end = self.select_callable(end_selector, "end")?;
+        let mut seen = BTreeSet::from([start.id.clone()]);
+        let mut queue = VecDeque::from([(start.id.clone(), Vec::new())]);
+        let mut found = None;
+        while let Some((entity_id, path)) = queue.pop_front() {
+            if entity_id == end.id {
+                found = Some(path);
+                break;
+            }
+            if path.len() == max_relationships {
+                continue;
+            }
+            for relationship in self
+                .call_graph_projection
+                .relationships
+                .iter()
+                .filter(|relationship| relationship.caller_entity_id == entity_id)
+            {
+                if seen.insert(relationship.callee_entity_id.clone()) {
+                    let mut next = path.clone();
+                    next.push(relationship.clone());
+                    queue.push_back((relationship.callee_entity_id.clone(), next));
+                }
+            }
+        }
+        let correspondence_claims = found
+            .as_deref()
+            .map(|path| self.correspondence_claims_for_relationships(path))
+            .unwrap_or_default();
+        Ok(CallPathResult {
+            query_name: "call-path".into(),
+            program_snapshot_id: self.program_snapshot.id.clone(),
+            start_entity_id: start.id.clone(),
+            end_entity_id: end.id.clone(),
+            max_relationships,
+            correspondence_claims,
+            path: found,
         })
     }
 
@@ -798,13 +1241,15 @@ impl PublishedSnapshot {
     /// disappear while its group still spans observation contexts.
     fn identity_evidence_groups(
         &self,
-    ) -> Result<BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>>, String> {
+    ) -> Result<BTreeMap<(&str, &ContributorCallableIdentity), IdentityEvidenceGroup<'_>>, String>
+    {
         let manifestations_by_id: BTreeMap<_, _> = self
             .manifestations
             .iter()
             .map(|manifestation| (manifestation.id.as_str(), manifestation))
             .collect();
-        let mut groups: BTreeMap<(&str, &str), IdentityEvidenceGroup<'_>> = BTreeMap::new();
+        let mut groups: BTreeMap<(&str, &ContributorCallableIdentity), IdentityEvidenceGroup<'_>> =
+            BTreeMap::new();
         let mut asserted_manifestations = BTreeSet::new();
         for evidence in self
             .evidence_records
@@ -826,7 +1271,7 @@ impl PublishedSnapshot {
             let group = groups
                 .entry((
                     manifestation.acquired_input_id.as_str(),
-                    manifestation.contributor_callable_id.as_str(),
+                    &manifestation.contributor_callable_identity,
                 ))
                 .or_default();
             group.manifestation_ids.insert(manifestation_id.as_str());
@@ -923,8 +1368,13 @@ impl PublishedSnapshot {
                 "published snapshot contains duplicate observation-context identities".into(),
             );
         }
-        let mut entity_contexts = BTreeMap::new();
+        let mut entity_identities = BTreeMap::new();
         let mut contributor_manifestations = BTreeSet::new();
+        // The value type owns each ID's scope; these indexes enforce the
+        // cross-manifestation invariants that one raw contributor ID cannot
+        // switch scopes and one input-scoped identity cannot span inputs.
+        let mut scopes_by_id: BTreeMap<&str, CallableIdentityScope> = BTreeMap::new();
+        let mut acquired_input_by_local_entity: BTreeMap<&str, &str> = BTreeMap::new();
         for manifestation in &self.manifestations {
             if !entities_by_id.contains_key(manifestation.entity_id.as_str()) {
                 return Err(format!(
@@ -936,12 +1386,6 @@ impl PublishedSnapshot {
                 return Err(format!(
                     "manifestation '{}' references unknown observation context '{}'",
                     manifestation.id, manifestation.observation_context_id
-                ));
-            }
-            if manifestation.contributor_callable_id.trim().is_empty() {
-                return Err(format!(
-                    "manifestation '{}' has an empty contributor callable identity",
-                    manifestation.id
                 ));
             }
             if !inputs_by_id.contains_key(manifestation.acquired_input_id.as_str()) {
@@ -962,32 +1406,73 @@ impl PublishedSnapshot {
                     manifestation.id, manifestation.acquired_input_id
                 ));
             }
+            // One contributor callable identity means one callable only
+            // within the scope its contributor declared for it.
+            let identity = &manifestation.contributor_callable_identity;
+            match scopes_by_id.entry(identity.as_str()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(identity.scope());
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    if *slot.get() != identity.scope() {
+                        return Err(format!(
+                            "contributor callable identity '{}' declares {:?} scope on one manifestation and {:?} on another",
+                            identity,
+                            slot.get(),
+                            identity.scope()
+                        ));
+                    }
+                }
+            }
+            // An identity scoped to its acquired input names a callable
+            // nothing outside that input can be, so one program entity carrying
+            // it may not span acquired inputs: two identically named
+            // translation-unit-local callables are different callables, and
+            // neither the core nor a hand-edited export may join them into one
+            // entity. The identity text itself may legitimately repeat, because
+            // two byte-identical translation units are indistinguishable to a
+            // contributor yet are still separate acquired inputs.
+            if identity.scope() == CallableIdentityScope::AcquiredInput
+                && let Some(first_input) = acquired_input_by_local_entity.insert(
+                    manifestation.entity_id.as_str(),
+                    manifestation.acquired_input_id.as_str(),
+                )
+                && first_input != manifestation.acquired_input_id.as_str()
+            {
+                return Err(format!(
+                    "program entity '{}' carries the acquired-input-scoped identity '{identity}' in both acquired input '{first_input}' and '{}'; a callable that is not visible beyond one acquired input is a different callable in another",
+                    manifestation.entity_id, manifestation.acquired_input_id
+                ));
+            }
             if !contributor_manifestations.insert((
                 manifestation.acquired_input_id.as_str(),
                 manifestation.observation_context_id.as_str(),
-                manifestation.contributor_callable_id.as_str(),
+                identity,
             )) {
                 return Err(format!(
                     "contributor callable identity '{}' has duplicate manifestations in observation context '{}'",
-                    manifestation.contributor_callable_id, manifestation.observation_context_id
+                    identity, manifestation.observation_context_id
                 ));
             }
-            match entity_contexts.insert(
+            match entity_identities.insert(
                 manifestation.entity_id.as_str(),
-                manifestation.observation_context_id.as_str(),
+                (manifestation.observation_context_id.as_str(), identity),
             ) {
-                Some(existing) if existing != manifestation.observation_context_id.as_str() => {
+                Some((existing_context, _))
+                    if existing_context != manifestation.observation_context_id.as_str() =>
+                {
                     return Err(format!(
                         "program entity '{}' is merged across observation contexts without correspondence evidence",
                         manifestation.entity_id
                     ));
                 }
-                Some(_) => {
+                Some((_, existing_identity)) if existing_identity != identity => {
                     return Err(format!(
                         "program entity '{}' merges distinct contributor callable identities in observation context '{}'",
                         manifestation.entity_id, manifestation.observation_context_id
                     ));
                 }
+                Some(_) => {}
                 None => {}
             }
         }
@@ -996,7 +1481,7 @@ impl PublishedSnapshot {
             .iter()
             .filter(|entity| entity.kind == ProgramEntityKind::Callable)
         {
-            if !entity_contexts.contains_key(callable.id.as_str()) {
+            if !entity_identities.contains_key(callable.id.as_str()) {
                 return Err(format!(
                     "callable entity '{}' has no context-specific manifestation",
                     callable.id
@@ -1236,12 +1721,6 @@ impl PublishedSnapshot {
                     claim.id, claim.rule
                 ));
             }
-            if claim.contributor_callable_id.trim().is_empty() {
-                return Err(format!(
-                    "correspondence claim '{}' has an empty contributor callable identity",
-                    claim.id
-                ));
-            }
             if !inputs_by_id.contains_key(claim.acquired_input_id.as_str()) {
                 return Err(format!(
                     "correspondence claim '{}' references unknown acquired input '{}'",
@@ -1250,11 +1729,11 @@ impl PublishedSnapshot {
             }
             if !correspondence_references.insert((
                 claim.acquired_input_id.as_str(),
-                claim.contributor_callable_id.as_str(),
+                &claim.contributor_callable_identity,
             )) {
                 return Err(format!(
                     "contributor callable identity '{}' has duplicate correspondence claims for acquired input '{}'",
-                    claim.contributor_callable_id, claim.acquired_input_id
+                    claim.contributor_callable_identity, claim.acquired_input_id
                 ));
             }
             let manifestation_ids = claim
@@ -1290,7 +1769,8 @@ impl PublishedSnapshot {
                     ));
                 }
                 if manifestation.acquired_input_id != claim.acquired_input_id
-                    || manifestation.contributor_callable_id != claim.contributor_callable_id
+                    || manifestation.contributor_callable_identity
+                        != claim.contributor_callable_identity
                 {
                     return Err(format!(
                         "correspondence claim '{}' does not preserve its contributor callable identity",
@@ -1359,7 +1839,7 @@ impl PublishedSnapshot {
             let group = identity_groups
                 .get(&(
                     claim.acquired_input_id.as_str(),
-                    claim.contributor_callable_id.as_str(),
+                    &claim.contributor_callable_identity,
                 ))
                 .filter(|group| group.observation_context_ids.len() > 1)
                 .ok_or_else(|| {
@@ -1393,16 +1873,16 @@ impl PublishedSnapshot {
                 ));
             }
         }
-        for ((acquired_input_id, contributor_callable_id), group) in &identity_groups {
+        for ((acquired_input_id, contributor_callable_identity), group) in &identity_groups {
             if group.observation_context_ids.len() < 2 {
                 continue;
             }
             if !self.correspondence_claims.iter().any(|claim| {
                 claim.acquired_input_id.as_str() == *acquired_input_id
-                    && claim.contributor_callable_id == *contributor_callable_id
+                    && claim.contributor_callable_identity == **contributor_callable_identity
             }) {
                 return Err(format!(
-                    "contributor callable identity '{contributor_callable_id}' has contributor-identity evidence in {} observation contexts of acquired input '{acquired_input_id}' but no correspondence claim",
+                    "contributor callable identity '{contributor_callable_identity}' has contributor-identity evidence in {} observation contexts of acquired input '{acquired_input_id}' but no correspondence claim",
                     group.observation_context_ids.len()
                 ));
             }
@@ -1477,16 +1957,31 @@ impl PublishedSnapshot {
                     resolution.call_site_id
                 )
             })?;
+            // A caller entity may manifest in several acquired inputs, because
+            // one linkage-namespace callable is declared by each input that
+            // names it. The manifestation this resolution rests on is the one
+            // read in the same acquired input as the call site.
+            let caller_input_id = call_site
+                .source_location
+                .as_ref()
+                .map(|location| &location.input_id)
+                .ok_or_else(|| {
+                    format!(
+                        "call site '{}' has no source location",
+                        resolution.call_site_id
+                    )
+                })?;
             let caller_manifestation = self
                 .manifestations
                 .iter()
                 .find(|manifestation| {
                     manifestation.entity_id == *caller_entity_id
                         && manifestation.observation_context_id == resolution.observation_context_id
+                        && manifestation.acquired_input_id == *caller_input_id
                 })
                 .ok_or_else(|| {
                     format!(
-                        "resolution for '{}' has no caller manifestation in observation context '{}'",
+                        "resolution for '{}' has no caller manifestation in observation context '{}' and acquired input '{caller_input_id}'",
                         resolution.call_site_id, resolution.observation_context_id
                     )
                 })?;
@@ -1888,9 +2383,8 @@ impl PublishedSnapshot {
 #[derive(Clone)]
 struct CallableIdentity {
     entity_id: ProgramEntityId,
-    manifestation_id: ManifestationId,
     display_name: String,
-    representation: String,
+    manifestation_ids_by_input: BTreeMap<AcquiredInputId, ManifestationId>,
 }
 
 #[derive(Clone)]
@@ -1906,7 +2400,7 @@ struct CallableReference {
 /// name, source line, or similar bodies.
 struct PublishedCallSite {
     acquired_input_id: AcquiredInputId,
-    caller_callable_id: String,
+    caller_callable_identity: ContributorCallableIdentity,
     caller: CallableReference,
     call_site_id: ProgramEntityId,
     resolution_index: usize,
@@ -1936,15 +2430,39 @@ struct AttachedCallSite {
 struct CorrespondenceSeed {
     input_index: usize,
     acquired_input_id: AcquiredInputId,
-    contributor_callable_id: String,
+    contributor_callable_identity: ContributorCallableIdentity,
     manifestation_ids: Vec<ManifestationId>,
 }
 
-type CallableIdentities = BTreeMap<ObservationContextId, BTreeMap<String, CallableIdentity>>;
+/// The callables published so far, keyed by the observation context and by the
+/// boundary the contributor's identity means one callable within.
+///
+/// A linkage-namespace identity is keyed by the identity alone, so every
+/// acquired input that declares the symbol manifests one entity. An
+/// acquired-input identity is keyed by the identity *and* the core-assigned
+/// acquired input, so two inputs that happen to assert the same text — two
+/// byte-identical translation units, which a contributor cannot tell apart —
+/// still publish two entities. Local callables are therefore held apart by
+/// construction rather than by rejecting the publication.
+type CallableIdentityKey = (ContributorCallableIdentity, Option<AcquiredInputId>);
+type CallableIdentities =
+    BTreeMap<ObservationContextId, BTreeMap<CallableIdentityKey, CallableIdentity>>;
+
+/// The boundary an identity is looked up within during publication.
+fn callable_identity_key(
+    identity: &ContributorCallableIdentity,
+    acquired_input_id: &AcquiredInputId,
+) -> CallableIdentityKey {
+    let input = match identity.scope() {
+        CallableIdentityScope::AcquiredInput => Some(acquired_input_id.clone()),
+        CallableIdentityScope::LinkageNamespace => None,
+    };
+    (identity.clone(), input)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn ensure_callable(
-    contributor_callable_id: &str,
+    contributor_callable_identity: &ContributorCallableIdentity,
     name: &str,
     representation: &str,
     snapshot_id: &ProgramSnapshotId,
@@ -1956,28 +2474,67 @@ fn ensure_callable(
     entities: &mut Vec<ProgramEntity>,
     manifestations: &mut Vec<Manifestation>,
 ) -> Result<CallableReference, String> {
-    let callable_index = identities.values().map(BTreeMap::len).sum::<usize>();
+    let identity_key = callable_identity_key(contributor_callable_identity, acquired_input_id);
     let context_identities = identities.entry(context_id.clone()).or_default();
-    if let Some(identity) = context_identities.get(contributor_callable_id) {
-        if identity.display_name != name || identity.representation != representation {
+    if let Some(identity) = context_identities.get_mut(&identity_key) {
+        if identity.display_name != name {
             return Err(format!(
-                "contributed callable identity '{contributor_callable_id}' has conflicting labels or representations in observation context '{context_id}'"
+                "contributed callable identity '{contributor_callable_identity}' has conflicting labels in observation context '{context_id}'"
             ));
         }
+        let manifestation_id = if let Some(manifestation_id) =
+            identity.manifestation_ids_by_input.get(acquired_input_id)
+        {
+            // A representation describes how one acquired input writes the
+            // callable, and a module writes each global once, so two
+            // representations for one identity in one input contradict each
+            // other. Across inputs they need not agree: one link-visible
+            // callable may be a `declare` in one unit and an alias in another,
+            // and each manifestation keeps how its own input wrote it.
+            let existing = manifestations
+                .iter()
+                .find(|manifestation| manifestation.id == *manifestation_id)
+                .expect("callable manifestation must exist");
+            if existing.representation != representation {
+                return Err(format!(
+                    "contributed callable identity '{contributor_callable_identity}' has conflicting representations in acquired input '{acquired_input_id}' and observation context '{context_id}'"
+                ));
+            }
+            manifestation_id.clone()
+        } else {
+            let callable_index = manifestations.len();
+            let manifestation_id = ManifestationId::new(format!(
+                "manifestation:{snapshot_id}:input:{input_index}:callable:{callable_index}"
+            ));
+            manifestations.push(Manifestation {
+                id: manifestation_id.clone(),
+                entity_id: identity.entity_id.clone(),
+                acquired_input_id: acquired_input_id.clone(),
+                contributor_callable_identity: contributor_callable_identity.clone(),
+                observation_context_id: context_id.clone(),
+                representation: representation.into(),
+                defined,
+            });
+            identity
+                .manifestation_ids_by_input
+                .insert(acquired_input_id.clone(), manifestation_id.clone());
+            manifestation_id
+        };
         if defined {
             manifestations
                 .iter_mut()
-                .find(|manifestation| manifestation.id == identity.manifestation_id)
+                .find(|manifestation| manifestation.id == manifestation_id)
                 .expect("callable manifestation must exist")
                 .defined = true;
         }
         return Ok(CallableReference {
             entity_id: identity.entity_id.clone(),
-            manifestation_id: identity.manifestation_id.clone(),
+            manifestation_id,
             display_name: identity.display_name.clone(),
         });
     }
 
+    let callable_index = manifestations.len();
     let entity_id = ProgramEntityId::new(format!(
         "entity:{snapshot_id}:input:{input_index}:callable:{callable_index}"
     ));
@@ -1995,18 +2552,20 @@ fn ensure_callable(
         id: manifestation_id.clone(),
         entity_id: entity_id.clone(),
         acquired_input_id: acquired_input_id.clone(),
-        contributor_callable_id: contributor_callable_id.into(),
+        contributor_callable_identity: contributor_callable_identity.clone(),
         observation_context_id: context_id.clone(),
         representation: representation.into(),
         defined,
     });
     context_identities.insert(
-        contributor_callable_id.into(),
+        identity_key,
         CallableIdentity {
             entity_id: entity_id.clone(),
-            manifestation_id: manifestation_id.clone(),
             display_name: name.into(),
-            representation: representation.into(),
+            manifestation_ids_by_input: BTreeMap::from([(
+                acquired_input_id.clone(),
+                manifestation_id.clone(),
+            )]),
         },
     );
     Ok(CallableReference {
@@ -2129,6 +2688,12 @@ pub(crate) fn publish(
     let mut derivations = Vec::new();
     let mut relationships = Vec::new();
     let mut projected_call_sites = Vec::new();
+    // Linkage-namespace identities intentionally live across acquired-input
+    // iterations. Their explicit contributor identity evidence makes one
+    // program entity, with one manifestation per input. Acquired-input
+    // identities are rejected if the same scoped identity reaches a second
+    // input.
+    let mut identities = BTreeMap::new();
     // Keyed by the qualifier a contributor call-site identity is unique within:
     // its observation context and its acquired input, the latter named by the
     // content fingerprint the contributor declared for it.
@@ -2151,10 +2716,9 @@ pub(crate) fn publish(
             content_fingerprint: contribution.input.content_fingerprint,
         });
 
-        let mut identities = BTreeMap::new();
         for (callable_index, function) in contribution.callables.into_iter().enumerate() {
             let callable = ensure_callable(
-                &function.contributor_callable_id,
+                &function.callable_identity,
                 &function.display_name,
                 &function.representation,
                 &snapshot_id,
@@ -2178,7 +2742,7 @@ pub(crate) fn publish(
                 &evidence_artifact,
                 format!(
                     "contributed evidence asserts contributor callable identity '{}' for this manifestation",
-                    function.contributor_callable_id
+                    function.callable_identity
                 ),
             ));
         }
@@ -2200,17 +2764,25 @@ pub(crate) fn publish(
                     let caller = identities
                         .get(&call.observation_context_id)
                         .and_then(|context_identities| {
-                            context_identities.get(&call.caller_callable_id)
+                            context_identities.get(&callable_identity_key(
+                                &call.caller_callable_identity,
+                                &input_id,
+                            ))
                         })
-                        .map(|identity| CallableReference {
-                            entity_id: identity.entity_id.clone(),
-                            manifestation_id: identity.manifestation_id.clone(),
-                            display_name: identity.display_name.clone(),
+                        .and_then(|identity| {
+                            identity
+                                .manifestation_ids_by_input
+                                .get(&input_id)
+                                .map(|manifestation_id| CallableReference {
+                                    entity_id: identity.entity_id.clone(),
+                                    manifestation_id: manifestation_id.clone(),
+                                    display_name: identity.display_name.clone(),
+                                })
                         })
                         .ok_or_else(|| {
                             format!(
                                 "call-site evidence references uncontributed caller identity '{}' in observation context '{}'",
-                                call.caller_callable_id, call.observation_context_id
+                                call.caller_callable_identity, call.observation_context_id
                             )
                         })?;
                     let call_site_index = contributed_index;
@@ -2275,7 +2847,7 @@ pub(crate) fn publish(
                         .or_default()
                         .push(PublishedCallSite {
                             acquired_input_id: input_id.clone(),
-                            caller_callable_id: call.caller_callable_id,
+                            caller_callable_identity: call.caller_callable_identity,
                             caller: caller.clone(),
                             call_site_id: call_site_id.clone(),
                             resolution_index: call_site_resolutions.len() - 1,
@@ -2326,12 +2898,12 @@ pub(crate) fn publish(
                             ));
                         }
                     };
-                    if published.caller_callable_id != reference.caller_callable_id {
+                    if published.caller_callable_identity != reference.caller_callable_identity {
                         return Err(format!(
                             "call-site attachment names caller identity '{}' but contributor call-site identity '{}' was contributed by caller '{}'",
-                            reference.caller_callable_id,
+                            reference.caller_callable_identity,
                             reference.contributor_call_site_id,
-                            published.caller_callable_id
+                            published.caller_callable_identity
                         ));
                     }
                     let call_site_id = published.call_site_id.clone();
@@ -2367,7 +2939,7 @@ pub(crate) fn publish(
             let mut projected_targets = Vec::new();
             for (target_index, target) in contributed_targets.into_iter().enumerate() {
                 let callee = ensure_callable(
-                    &target.target_callable_id,
+                    &target.target_callable_identity,
                     &target.callee_display_name,
                     &target.target_representation,
                     &snapshot_id,
@@ -2440,31 +3012,41 @@ pub(crate) fn publish(
                 .targets
                 .extend(projected_targets);
         }
-
-        let mut manifestations_by_contributor_id: BTreeMap<String, Vec<ManifestationId>> =
-            BTreeMap::new();
-        for context_identities in identities.values() {
-            for (contributor_callable_id, identity) in context_identities {
-                manifestations_by_contributor_id
-                    .entry(contributor_callable_id.clone())
-                    .or_default()
-                    .push(identity.manifestation_id.clone());
-            }
-        }
-        correspondence_seeds.extend(
-            manifestations_by_contributor_id
-                .into_iter()
-                .filter(|(_, manifestation_ids)| manifestation_ids.len() > 1)
-                .map(
-                    |(contributor_callable_id, manifestation_ids)| CorrespondenceSeed {
-                        input_index,
-                        acquired_input_id: input_id.clone(),
-                        contributor_callable_id,
-                        manifestation_ids,
-                    },
-                ),
-        );
     }
+
+    let input_indexes = acquired_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| (input.id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut manifestations_by_input_and_identity: BTreeMap<
+        (AcquiredInputId, ContributorCallableIdentity),
+        Vec<ManifestationId>,
+    > = BTreeMap::new();
+    for manifestation in &manifestations {
+        manifestations_by_input_and_identity
+            .entry((
+                manifestation.acquired_input_id.clone(),
+                manifestation.contributor_callable_identity.clone(),
+            ))
+            .or_default()
+            .push(manifestation.id.clone());
+    }
+    correspondence_seeds.extend(
+        manifestations_by_input_and_identity
+            .into_iter()
+            .filter(|(_, manifestation_ids)| manifestation_ids.len() > 1)
+            .map(
+                |((acquired_input_id, contributor_callable_identity), manifestation_ids)| {
+                    CorrespondenceSeed {
+                        input_index: input_indexes[&acquired_input_id],
+                        acquired_input_id,
+                        contributor_callable_identity,
+                        manifestation_ids,
+                    }
+                },
+            ),
+    );
 
     let mut identity_evidence_by_manifestation: BTreeMap<
         (&AcquiredInputId, &ManifestationId),
@@ -2508,7 +3090,7 @@ pub(crate) fn publish(
             )),
             rule: CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE.into(),
             acquired_input_id: seed.acquired_input_id,
-            contributor_callable_id: seed.contributor_callable_id,
+            contributor_callable_identity: seed.contributor_callable_identity,
             manifestation_ids,
             evidence_ids: evidence_ids.into_iter().collect(),
         });

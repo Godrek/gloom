@@ -1,11 +1,12 @@
 use gloom::app::{Application, NamedQuery};
 use gloom::{
-    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CompletenessBasis,
+    CONTRIBUTED_EVIDENCE_TARGET_RULE, CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE,
+    CallRelationshipsResult, CallableIdentityScope, CallableSelector, CompletenessBasis,
     ContributedCallKind, ContributedCallSite, ContributedCallable, ContributedEvidence,
     ContributedEvidenceLocation, ContributedInput, ContributedTargetClaim, ContributorCallSiteId,
-    ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION, EvidenceCapability,
-    EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport, LlvmTextContributor,
-    NamedQueryResult, ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
+    ContributorCallableIdentity, ContributorIdentity, EVIDENCE_CONTRIBUTOR_CONTRACT_VERSION,
+    EvidenceCapability, EvidenceContribution, EvidenceContributor, EvidenceScope, EvidenceSupport,
+    LlvmTextContributor, ObservationContext, ProgramEntityKind, PublishedSnapshot, Resolution,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -22,6 +23,10 @@ fn fixture_context() -> ObservationContext {
         env!("CARGO_PKG_VERSION"),
         "llvm-ir extraction",
     )
+}
+
+fn callable_identity(value: &str) -> ContributorCallableIdentity {
+    ContributorCallableIdentity::new(value, CallableIdentityScope::LinkageNamespace).unwrap()
 }
 
 fn evidence(
@@ -97,7 +102,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 .into_iter()
                 .enumerate()
                 .map(|(index, name)| ContributedCallable {
-                    contributor_callable_id: name.into(),
+                    callable_identity: callable_identity(name),
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
@@ -112,7 +117,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                     ),
                 })
                 .chain([ContributedCallable {
-                    contributor_callable_id: "first_target".into(),
+                    callable_identity: callable_identity("first_target"),
                     display_name: "first_target".into(),
                     defined: true,
                     representation: "runtime-fixture-callable".into(),
@@ -130,7 +135,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
             call_sites: vec![ContributedCallSite {
                 contributor_call_site_id: ContributorCallSiteId::new("dispatch:7").unwrap(),
                 kind: ContributedCallKind::Indirect,
-                caller_callable_id: "dispatch".into(),
+                caller_callable_identity: callable_identity("dispatch"),
                 line: 7,
                 observation_context_id: context.id.clone(),
                 resolution: Resolution::Partial,
@@ -143,7 +148,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                 ),
                 target_claims: vec![
                     ContributedTargetClaim {
-                        target_callable_id: "first_target".into(),
+                        target_callable_identity: callable_identity("first_target"),
                         callee_display_name: "first_target".into(),
                         target_representation: "fixture-callable".into(),
                         observation_context_id: context.id.clone(),
@@ -156,7 +161,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                         )],
                     },
                     ContributedTargetClaim {
-                        target_callable_id: "first_target".into(),
+                        target_callable_identity: callable_identity("first_target"),
                         callee_display_name: "first_target".into(),
                         target_representation: "runtime-fixture-callable".into(),
                         observation_context_id: runtime_context.id.clone(),
@@ -169,7 +174,7 @@ impl EvidenceContributor for PossibleTargetsFixture {
                         )],
                     },
                     ContributedTargetClaim {
-                        target_callable_id: "second_target".into(),
+                        target_callable_identity: callable_identity("second_target"),
                         callee_display_name: "second_target".into(),
                         target_representation: "fixture-callable".into(),
                         observation_context_id: context.id.clone(),
@@ -230,7 +235,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
             observation_contexts: vec![context.clone(), runtime_context.clone()],
             callables: vec![
                 ContributedCallable {
-                    contributor_callable_id: "static-worker-a".into(),
+                    callable_identity: callable_identity("static-worker-a"),
                     display_name: "worker".into(),
                     defined: true,
                     representation: "static-worker-a".into(),
@@ -245,7 +250,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     ),
                 },
                 ContributedCallable {
-                    contributor_callable_id: "static-worker-b".into(),
+                    callable_identity: callable_identity("static-worker-b"),
                     display_name: "worker".into(),
                     defined: true,
                     representation: "static-worker-b".into(),
@@ -260,7 +265,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     ),
                 },
                 ContributedCallable {
-                    contributor_callable_id: "runtime-worker".into(),
+                    callable_identity: callable_identity("runtime-worker"),
                     display_name: "worker".into(),
                     defined: true,
                     representation: "runtime-worker".into(),
@@ -280,7 +285,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     contributor_call_site_id: ContributorCallSiteId::new("static-worker-a:1")
                         .unwrap(),
                     kind: ContributedCallKind::Indirect,
-                    caller_callable_id: "static-worker-a".into(),
+                    caller_callable_identity: callable_identity("static-worker-a"),
                     line: 1,
                     observation_context_id: context.id.clone(),
                     resolution: Resolution::Absent,
@@ -297,7 +302,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     contributor_call_site_id: ContributorCallSiteId::new("static-worker-b:2")
                         .unwrap(),
                     kind: ContributedCallKind::Indirect,
-                    caller_callable_id: "static-worker-b".into(),
+                    caller_callable_identity: callable_identity("static-worker-b"),
                     line: 2,
                     observation_context_id: context.id.clone(),
                     resolution: Resolution::Absent,
@@ -314,7 +319,7 @@ impl EvidenceContributor for SameLabelCallersFixture {
                     contributor_call_site_id: ContributorCallSiteId::new("runtime-worker:3")
                         .unwrap(),
                     kind: ContributedCallKind::Indirect,
-                    caller_callable_id: "runtime-worker".into(),
+                    caller_callable_identity: callable_identity("runtime-worker"),
                     line: 3,
                     observation_context_id: runtime_context.id.clone(),
                     resolution: Resolution::Absent,
@@ -367,7 +372,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                 .into_iter()
                 .enumerate()
                 .map(|(index, name)| ContributedCallable {
-                    contributor_callable_id: name.into(),
+                    callable_identity: callable_identity(name),
                     display_name: name.into(),
                     defined: true,
                     representation: "fixture-callable".into(),
@@ -385,7 +390,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
             call_sites: vec![ContributedCallSite {
                 contributor_call_site_id: ContributorCallSiteId::new("caller:1").unwrap(),
                 kind: ContributedCallKind::Indirect,
-                caller_callable_id: "caller".into(),
+                caller_callable_identity: callable_identity("caller"),
                 line: 1,
                 observation_context_id: context.id.clone(),
                 resolution: Resolution::Complete,
@@ -400,7 +405,7 @@ impl EvidenceContributor for WorkloadUnqualifiedRuntimeEvidenceFixture {
                     )
                 },
                 target_claims: vec![ContributedTargetClaim {
-                    target_callable_id: "runtime_target".into(),
+                    target_callable_identity: callable_identity("runtime_target"),
                     callee_display_name: "runtime_target".into(),
                     target_representation: "fixture-callable".into(),
                     observation_context_id: context.id.clone(),
@@ -488,8 +493,10 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "worker".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("worker".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap_err();
@@ -505,14 +512,17 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "worker".into(),
-                caller_entity_id: Some(selected.id.clone()),
+                caller: CallableSelector {
+                    label: Some("worker".into()),
+                    entity_id: Some(selected.id.clone()),
+                },
             },
         )
         .unwrap();
-    assert_eq!(selected_result.caller_entity_id, selected.id);
+    let selected_result = selected_result.call_relationships().unwrap();
+    assert_eq!(selected_result.selected_callable_entity_id, selected.id);
     assert_eq!(
-        selected_result.caller_observation_context_id,
+        selected_result.selected_callable_observation_context_id,
         selected_manifestation.observation_context_id
     );
     assert_eq!(selected_result.call_sites.len(), 1);
@@ -602,11 +612,11 @@ fn callable_identity_and_named_queries_do_not_blend_same_label_callers() {
     let selected_cli_result: serde_json::Value =
         serde_json::from_slice(&selected_cli.stdout).unwrap();
     assert_eq!(
-        selected_cli_result["caller_entity_id"],
+        selected_cli_result["selected_callable_entity_id"],
         serde_json::json!(selected.id)
     );
     assert_eq!(
-        selected_cli_result["caller_observation_context_id"],
+        selected_cli_result["selected_callable_observation_context_id"],
         serde_json::json!(selected_manifestation.observation_context_id)
     );
     assert_eq!(
@@ -639,11 +649,14 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
     let call_site = &result.call_sites[0];
     assert_eq!(call_site.resolution, Resolution::Partial);
     assert_eq!(
@@ -733,9 +746,12 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
         static_context.id
     );
     assert_eq!(static_manifestation.representation, "fixture-callable");
-    assert_eq!(static_manifestation.contributor_callable_id, "first_target");
     assert_eq!(
-        runtime_manifestation.contributor_callable_id,
+        static_manifestation.contributor_callable_identity.as_str(),
+        "first_target"
+    );
+    assert_eq!(
+        runtime_manifestation.contributor_callable_identity.as_str(),
         "first_target"
     );
     assert_eq!(
@@ -774,7 +790,10 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
         correspondence.rule,
         CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE
     );
-    assert_eq!(correspondence.contributor_callable_id, "first_target");
+    assert_eq!(
+        correspondence.contributor_callable_identity.as_str(),
+        "first_target"
+    );
     assert_eq!(
         correspondence
             .manifestation_ids
@@ -947,7 +966,7 @@ fn partial_resolution_keeps_multiple_targets_and_independent_evidence_types() {
     assert!(html.contains("Target correspondence"));
     assert!(html.contains(correspondence.id.as_str()));
     assert!(html.contains(CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE));
-    assert!(html.contains(&correspondence.contributor_callable_id));
+    assert!(html.contains(correspondence.contributor_callable_identity.as_str()));
     assert!(html.contains("Resolution context"));
     assert!(html.contains(runtime_context.id.as_str()));
 
@@ -1010,11 +1029,14 @@ fn named_queries_and_exported_projections_preserve_unresolved_call_sites() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(result.call_sites.len(), 2);
     assert!(result.call_sites.iter().all(|site| {
@@ -1030,11 +1052,14 @@ fn named_queries_and_exported_projections_preserve_unresolved_call_sites() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "run_callback".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("run_callback".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let callback_result = callback_result.call_relationships().unwrap();
     assert_eq!(callback_result.call_sites.len(), 2);
     assert_eq!(
         callback_result
@@ -1097,11 +1122,14 @@ fn tokenized_llvm_calls_ignore_comments_newlines_and_label_placement() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "tokenized_calls".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("tokenized_calls".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(result.call_sites.len(), 3);
     assert_eq!(result.relationships.len(), 1);
@@ -1167,22 +1195,28 @@ fn llvm_metadata_and_aggregate_prefixes_preserve_instruction_boundaries() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "metadata_only".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("metadata_only".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let metadata_only = metadata_only.call_relationships().unwrap();
     assert!(metadata_only.call_sites.is_empty());
 
     let aggregate_prefix = application
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "aggregate_prefix".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("aggregate_prefix".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let aggregate_prefix = aggregate_prefix.call_relationships().unwrap();
     assert_eq!(aggregate_prefix.call_sites.len(), 1);
     assert_eq!(
         aggregate_prefix.call_sites[0].resolution,
@@ -1214,11 +1248,14 @@ fn explicit_function_types_do_not_hide_the_callee_operand() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "named_type_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("named_type_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(
         result
@@ -1273,11 +1310,14 @@ fn literal_aggregate_return_types_do_not_end_the_callee_search() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "aggregate_return_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("aggregate_return_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(
         result
@@ -1438,11 +1478,14 @@ fn quoted_identifier_braces_do_not_hide_following_indirect_calls() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "quoted_brace_caller".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("quoted_brace_caller".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
 
     assert_eq!(result.call_sites.len(), 2);
     assert_eq!(result.call_sites[0].resolution, Resolution::Complete);
@@ -1482,11 +1525,14 @@ fn unresolved_call_site_explanations_are_inspectable_in_the_viewer() {
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: "dispatch".into(),
-                caller_entity_id: None,
+                caller: CallableSelector {
+                    label: Some("dispatch".into()),
+                    entity_id: None,
+                },
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap();
     let unresolved = &result.call_sites[0];
 
     let explanation = application
@@ -1563,7 +1609,7 @@ fn llvm_callee_query(
     build_target: &str,
     fixture: &str,
     caller_name: &str,
-) -> (PublishedSnapshot, NamedQueryResult, Vec<usize>) {
+) -> (PublishedSnapshot, CallRelationshipsResult, Vec<usize>) {
     let application = Application;
     let context = ObservationContext::static_analysis(
         format!("snapshot:{build_target}"),
@@ -1585,11 +1631,11 @@ fn llvm_callee_query(
         .query_snapshot(
             &snapshot,
             NamedQuery::Callees {
-                caller_name: caller_name.into(),
-                caller_entity_id: None,
+                caller: CallableSelector::by_label(caller_name),
             },
         )
         .unwrap();
+    let result = result.call_relationships().unwrap().clone();
     let lines = result
         .call_sites
         .iter()
@@ -1608,7 +1654,7 @@ fn llvm_callee_query(
     (snapshot, result, lines)
 }
 
-fn resolutions(result: &NamedQueryResult) -> Vec<Resolution> {
+fn resolutions(result: &CallRelationshipsResult) -> Vec<Resolution> {
     result
         .call_sites
         .iter()

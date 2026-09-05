@@ -17,11 +17,13 @@ pub use llvm::LlvmTextContributor;
 pub use model::{AnalysisSummary, Document, Edge, Metadata, Node};
 pub use snapshot::{
     AcquiredInput, AcquiredInputId, CONTRIBUTED_EVIDENCE_TARGET_RULE,
-    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CallGraphProjection, CallRelationship,
-    CallSiteResolution, CompletenessBasis, CorrespondenceClaim, CorrespondenceClaimId, Derivation,
+    CONTRIBUTOR_IDENTITY_CORRESPONDENCE_RULE, CallGraphProjection, CallPathResult,
+    CallRelationship, CallRelationshipsResult, CallSiteResolution, CallableDeclaration,
+    CallableIdentityScope, CallableSearchResult, CallableSelector, CompletenessBasis,
+    ContributorCallableIdentity, CorrespondenceClaim, CorrespondenceClaimId, Derivation,
     EvidenceId, EvidenceRecord, EvidenceScope, EvidenceSupport, Explanation, ExplanationHandle,
     Manifestation, ManifestationId, NamedQueryResult, ObservationContext, ObservationContextId,
     ProgramEntity, ProgramEntityId, ProgramEntityKind, ProgramSnapshot, ProgramSnapshotId,
     ProjectedCallSite, ProjectedCallTarget, PublishedSnapshot, Resolution, SNAPSHOT_SCHEMA_VERSION,
-    SourceLocation, TargetClaim, TargetClaimId,
+    SearchedCallable, SearchedCallableManifestation, SourceLocation, TargetClaim, TargetClaimId,
 };
