@@ -25,6 +25,9 @@ use std::path::PathBuf;
 const FIRST_UNIT: &str = "tests/fixtures/local-shadow-first.ll";
 const SECOND_UNIT: &str = "tests/fixtures/local-shadow-second.ll";
 const LINKAGE_PREFIXES: &str = "tests/fixtures/linkage-prefixes.ll";
+const ESCAPED_IDENTIFIERS: &str = "tests/fixtures/escaped-identifiers.ll";
+const MIXED_DECLARATION: &str = "tests/fixtures/mixed-representation-declaration.ll";
+const MIXED_ALIAS: &str = "tests/fixtures/mixed-representation-alias.ll";
 
 fn context(build_target: &str) -> ObservationContext {
     ObservationContext::static_analysis(
@@ -747,5 +750,88 @@ fn a_prototype_export_that_repeats_an_identity_is_rejected() {
     assert!(
         error.contains("more than one entity identified as"),
         "unexpected error: {error}"
+    );
+}
+
+/// Identity follows the identifier LLVM emits, not the spelling the module
+/// used. Every expectation below is the object file's own symbol table:
+/// `t foo`, `T __unnamed_1`, `T 0`, `T a"b`, `T escaped_caller`.
+#[test]
+fn identity_follows_the_decoded_identifier_rather_than_its_spelling() {
+    let snapshot = publish_units("escaped-identifiers", &[ESCAPED_IDENTIFIERS]).unwrap();
+
+    // `@"\66oo"` is `@foo`, so the call resolves to the internal callable the
+    // module defines rather than becoming an unresolved site naming nothing.
+    let caller = callables(&snapshot, "escaped_caller")[0];
+    let reached = relationship_query(
+        &snapshot,
+        NamedQuery::Callees {
+            caller: CallableSelector::by_entity_id(caller.id.clone()),
+        },
+    );
+    assert_eq!(
+        reached
+            .relationships
+            .iter()
+            .map(|relationship| relationship.callee_display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["foo"]
+    );
+    assert_eq!(
+        reached
+            .call_sites
+            .iter()
+            .map(|site| site.resolution)
+            .collect::<Vec<_>>(),
+        [gloom::Resolution::Complete]
+    );
+    // The escaped spelling introduced no second callable.
+    assert_eq!(callables(&snapshot, "foo").len(), 1);
+
+    // `@0` and `@"0"` share a label and are two callables, which is the clearest
+    // case of a label that cannot be an identity.
+    let zeroes = callables(&snapshot, "0");
+    assert_eq!(zeroes.len(), 2, "{zeroes:?}");
+    assert_ne!(zeroes[0].id, zeroes[1].id);
+    let zero_identities = manifestations_of(&snapshot, "0")
+        .iter()
+        .map(|manifestation| {
+            manifestation
+                .contributor_callable_identity
+                .as_str()
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(zero_identities.len(), 2, "{zero_identities:?}");
+
+    // A backslash does not end a quoted identifier, so the name keeps its quote.
+    assert_eq!(callables(&snapshot, "a\"b").len(), 1);
+}
+
+/// One link-visible callable may be written differently in each unit that
+/// names it: a `declare` in one, an alias in another. Both spellings assemble,
+/// both name the symbol `foo`, and the representation belongs to each
+/// manifestation rather than deciding whether they are one callable.
+#[test]
+fn one_exported_callable_may_be_written_differently_in_each_input() {
+    let snapshot =
+        publish_units("mixed-representations", &[MIXED_DECLARATION, MIXED_ALIAS]).unwrap();
+
+    let foo = callables(&snapshot, "foo");
+    assert_eq!(foo.len(), 1, "{foo:?}");
+    assert_eq!(
+        manifestations_of(&snapshot, "foo")
+            .iter()
+            .map(|manifestation| manifestation.representation.as_str())
+            .collect::<Vec<_>>(),
+        ["llvm-function", "llvm-alias"]
+    );
+    assert_eq!(
+        manifestations_of(&snapshot, "foo")
+            .iter()
+            .map(|manifestation| manifestation.contributor_callable_identity.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        1
     );
 }
