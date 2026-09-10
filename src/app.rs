@@ -55,6 +55,23 @@ pub enum QueryResult {
 }
 
 impl Application {
+    /// List the targets explicitly supplied by a local build declaration.
+    pub fn declared_build_targets(
+        &self,
+        manifest: &std::path::Path,
+    ) -> Result<Vec<crate::acquisition::DeclaredTarget>, String> {
+        Ok(crate::acquisition::load(manifest)?.targets)
+    }
+
+    /// Publish only the selected target's declared evidence artifacts.
+    pub fn publish_declared_build(
+        &self,
+        manifest: &std::path::Path,
+        target: &str,
+    ) -> Result<PublishedSnapshot, String> {
+        crate::acquisition::publish(manifest, target)
+    }
+
     pub fn publish_snapshot<C: EvidenceContributor + ?Sized>(
         &self,
         inputs: &[PathBuf],

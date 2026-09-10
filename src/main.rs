@@ -26,6 +26,16 @@ const EXPLAIN_KIND: &[&str] = &["explain"];
 
 #[derive(Subcommand)]
 enum Commands {
+    /// List targets in a local declared-build manifest.
+    BuildTargets { manifest: PathBuf },
+    /// Ingest existing LLVM IR artifacts for one explicitly declared build target.
+    IngestBuild {
+        manifest: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(short, long, default_value = "snapshot.json")]
+        output: PathBuf,
+    },
     /// Build a graph from C or textual LLVM IR.
     Build {
         #[arg(required = true)]
@@ -167,6 +177,22 @@ fn selector(
 fn run() -> Result<(), String> {
     let application = Application;
     match Cli::parse().command {
+        Commands::BuildTargets { manifest } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&application.declared_build_targets(&manifest)?)
+                    .map_err(|error| error.to_string())?
+            );
+        }
+        Commands::IngestBuild {
+            manifest,
+            target,
+            output,
+        } => {
+            let snapshot = application.publish_declared_build(&manifest, &target)?;
+            write(&output, &application.export_snapshot_json(&snapshot)?)?;
+            println!("Wrote target {target} to {}", output.display());
+        }
         Commands::Build {
             inputs,
             output,

@@ -19,13 +19,11 @@ The namespace such an identity is joined in is the observation context's,
 and nothing wider. A context names one build target, so its acquired inputs
 are the ones contributing to that artifact; aggregation is keyed by context
 and never crosses one, and across contexts the manifestations stay separate
-entities related by a correspondence claim. That the declared inputs really
-do contribute to the declared target is acquisition evidence Gloom does not
-yet collect, so it is the observation context's declaration, on the same
-footing as every other claim that context bounds. A publication that
-declares one build target for inputs from two unrelated artifacts therefore
-describes a link that was never performed — a misdeclared context, not a
-name-based merge.
+entities related by a correspondence claim. The acquisition contract and its
+trust boundary are documented in [declared build evidence](../declared-build.md#evidence-and-limits).
+A publication that declares one build target for inputs from two unrelated
+artifacts describes a link that was never performed — a misdeclared context,
+not a name-based merge.
 
 This aggregation is consistent with ADR 0002 because it does not infer
 sameness from the program entity's display name. The contributor explicitly

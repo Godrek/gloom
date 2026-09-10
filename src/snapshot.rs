@@ -719,6 +719,8 @@ pub struct PublishedSnapshot {
     schema_version: String,
     program_snapshot: ProgramSnapshot,
     acquired_inputs: Vec<AcquiredInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_build: Option<crate::acquisition::DeclaredBuildAcquisition>,
     observation_contexts: Vec<ObservationContext>,
     program_entities: Vec<ProgramEntity>,
     manifestations: Vec<Manifestation>,
@@ -752,6 +754,8 @@ mod wire {
         pub(super) schema_version: String,
         pub(super) program_snapshot: ProgramSnapshot,
         pub(super) acquired_inputs: Vec<AcquiredInput>,
+        #[serde(default)]
+        pub(super) declared_build: Option<crate::acquisition::DeclaredBuildAcquisition>,
         pub(super) observation_contexts: Vec<ObservationContext>,
         pub(super) program_entities: Vec<ProgramEntity>,
         pub(super) manifestations: Vec<Manifestation>,
@@ -772,6 +776,7 @@ impl TryFrom<wire::PublishedSnapshot> for PublishedSnapshot {
             schema_version: document.schema_version,
             program_snapshot: document.program_snapshot,
             acquired_inputs: document.acquired_inputs,
+            declared_build: document.declared_build,
             observation_contexts: document.observation_contexts,
             program_entities: document.program_entities,
             manifestations: document.manifestations,
@@ -812,6 +817,19 @@ struct IdentityEvidenceGroup<'a> {
 }
 
 impl PublishedSnapshot {
+    pub fn declared_build(&self) -> Option<&crate::acquisition::DeclaredBuildAcquisition> {
+        self.declared_build.as_ref()
+    }
+
+    pub(crate) fn with_declared_build(
+        mut self,
+        acquisition: crate::acquisition::DeclaredBuildAcquisition,
+    ) -> Result<Self, String> {
+        acquisition.validate(&self)?;
+        self.declared_build = Some(acquisition);
+        Ok(self)
+    }
+
     pub fn schema_version(&self) -> &str {
         &self.schema_version
     }
@@ -1288,6 +1306,9 @@ impl PublishedSnapshot {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if let Some(acquisition) = &self.declared_build {
+            acquisition.validate(self)?;
+        }
         if self.schema_version != SNAPSHOT_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported snapshot schema {:?}",
@@ -3139,6 +3160,7 @@ pub(crate) fn publish(
             id: snapshot_id.clone(),
         },
         acquired_inputs,
+        declared_build: None,
         observation_contexts,
         program_entities,
         manifestations,

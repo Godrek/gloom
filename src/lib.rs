@@ -1,3 +1,4 @@
+pub mod acquisition;
 mod analysis;
 pub mod app;
 mod contributor;
