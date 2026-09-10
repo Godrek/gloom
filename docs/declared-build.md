@@ -86,8 +86,10 @@ This ingestion format currently supports textual LLVM IR; native object files,
 bitcode, archive extraction, and link-time transformations are not supported.
 
 The exported snapshot's optional `declared_build` record retains the manifest
-location and selected declaration. Its `compilations` and `acquired_input_ids`
-arrays correspond one-to-one in target membership order. Each ID is the same
+location and selected declaration. Its `declaration.compilations` and
+`acquired_input_ids` arrays correspond one-to-one in target membership order.
+Declaration paths are resolved to absolute paths; argv remains verbatim.
+Each ID is the same
 acquired-input ID cited by searchable callable declarations and expanded
 explanation evidence. Follow it to recover the original argv, working directory,
 source input, and generated/configured inputs; the acquired input retains the
@@ -95,7 +97,9 @@ IR content fingerprint and evidence-artifact location. Generated-input paths are
 build declarations, not reconstructed source locations for individual LLVM calls.
 
 Loading an export revalidates the declaration against its observation context,
-acquired inputs, and target membership without reopening build files. Snapshots
+acquired inputs, and target membership without reopening build files. It preserves
+the historical extraction version while checking observation-context integrity;
+the reader's version need not match the extractor's version. Snapshots
 published through the earlier `publish` command have no `declared_build` record
 and make only that command's caller-supplied context declaration.
 
