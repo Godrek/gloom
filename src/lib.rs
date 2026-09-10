@@ -4,6 +4,7 @@ pub mod app;
 mod contributor;
 mod llvm;
 mod model;
+pub mod publication;
 mod snapshot;
 mod viewer;
 

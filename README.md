@@ -13,6 +13,9 @@ validates only a small part of that direction.
 - Ingest [declared build evidence](docs/declared-build.md) from local manifests,
   select an explicitly declared target, and retain compilation and generated-input
   records alongside its evidence-backed snapshot.
+- [Incrementally publish declared builds](docs/incremental-publication.md) through
+  an in-process session that reuses unchanged LLVM analysis and atomically switches
+  snapshots while readers retain independently queryable prior generations.
 - Compile one or more C files to textual LLVM IR with Clang.
 - Ingest existing `.ll` files.
 - Extract direct calls and retain unresolved indirect calls explicitly. A call
