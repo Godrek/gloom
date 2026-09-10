@@ -184,7 +184,10 @@ fn reload_preserves_historical_extraction_version_and_validates_context() {
         let error = Application
             .load_snapshot_json(&corrupted.to_string())
             .unwrap_err();
-        assert!(error.contains("disagrees with observation context"), "{error}");
+        assert!(
+            error.contains("disagrees with observation context"),
+            "{error}"
+        );
     }
     let mut corrupted = value.clone();
     corrupted["declared_build"]["declaration"]["targets"][0]["name"] = json!("another");
