@@ -81,7 +81,10 @@ compilation-to-artifact association, generated inputs, and membership. Gloom
 validates declaration structure and reference consistency; it does not establish
 that a link command ran or independently prove that supplied IR was produced by
 the declared compiler argv. Supplying unrelated artifacts under one target would
-be a false declaration. Capture of a real build is separate work tracked by #9.
+be a false declaration. The producer must supply coherent, finished artifacts
+and keep them unchanged throughout acquisition; Gloom does not detect a producer
+rewriting multiple artifacts mid-acquisition. It does not rebuild source or
+watch headers. Capture of a real build is separate work tracked by #9.
 This ingestion format currently supports textual LLVM IR; native object files,
 bitcode, archive extraction, and link-time transformations are not supported.
 

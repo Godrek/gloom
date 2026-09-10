@@ -110,6 +110,32 @@ fn explain_main(snapshot: &PublishedSnapshot) {
     assert_eq!(&roundtrip, snapshot);
 }
 
+// Capture the public query/explanation surface, rather than implementation details.
+fn report_generation(phase: &str, snapshot: &PublishedSnapshot, status: IndexingStatus) {
+    let result = Application
+        .query_snapshot(
+            snapshot,
+            NamedQuery::Callees {
+                caller: CallableSelector::by_label("main"),
+            },
+        )
+        .unwrap();
+    let handle = &result.call_relationships().unwrap().relationships[0].explanation_handle;
+    let explanation = Application.explain_snapshot(snapshot, handle).unwrap();
+    println!(
+        "{}",
+        json!({
+            "phase": phase,
+            "snapshot": snapshot.program_snapshot().id.as_str(),
+            "status": format!("{status:?}"),
+            "helper_visible": has_helper(snapshot),
+            "contexts": snapshot.observation_contexts(),
+            "query": result,
+            "explanation": explanation,
+        })
+    );
+}
+
 #[test]
 fn readers_pin_old_generation_until_complete_replacement_is_published() {
     let mut build = Build::new();
@@ -147,6 +173,11 @@ fn readers_pin_old_generation_until_complete_replacement_is_published() {
             analyzed: 1
         })
     );
+    report_generation(
+        "reader while replacement is ready",
+        &session.current().unwrap(),
+        session.status(),
+    );
     for _ in 0..20 {
         let pinned = session.current().unwrap();
         assert!(Arc::ptr_eq(&pinned, &old));
@@ -171,6 +202,8 @@ fn readers_pin_old_generation_until_complete_replacement_is_published() {
     assert_eq!(Application.export_snapshot_json(&old).unwrap(), old_json);
     explain_main(&old);
     explain_main(&new);
+    report_generation("pinned reader after publication", &old, session.status());
+    report_generation("current reader after publication", &new, session.status());
     assert_eq!(
         session.status(),
         IndexingStatus::Published(IndexingProgress {
@@ -179,6 +212,41 @@ fn readers_pin_old_generation_until_complete_replacement_is_published() {
             analyzed: 1
         })
     );
+}
+
+#[test]
+fn malformed_artifact_preserves_generation_and_retry_reuses_successful_cache() {
+    let mut build = Build::new();
+    let session = Application.publication_session();
+    let old = session
+        .reindex_declared_build(&build.manifest("one"), "server", |_| {})
+        .unwrap();
+    let old_json = Application.export_snapshot_json(&old).unwrap();
+    std::fs::write(build.directory.join("worker.ll"), "define void @worker()\n").unwrap();
+    let error = session
+        .reindex_declared_build(&build.manifest("two"), "server", |_| {})
+        .unwrap_err();
+    assert!(error.contains("no body"), "{error}");
+    assert!(Arc::ptr_eq(&old, &session.current().unwrap()));
+    assert!(matches!(session.status(), IndexingStatus::Failed { .. }));
+    explain_main(&old);
+    report_generation("reader after extraction failure", &old, session.status());
+    build.change_worker();
+    let new = session
+        .reindex_declared_build(&build.manifest("two"), "server", |_| {})
+        .unwrap();
+    assert!(has_helper(&new));
+    assert_eq!(Application.export_snapshot_json(&old).unwrap(), old_json);
+    assert_eq!(
+        session.status(),
+        IndexingStatus::Published(IndexingProgress {
+            total: 2,
+            reused: 1,
+            analyzed: 1,
+        })
+    );
+    explain_main(&new);
+    report_generation("reader after successful retry", &new, session.status());
 }
 
 #[test]
@@ -200,6 +268,7 @@ fn failures_preserve_current_and_successful_cache_and_ids_cannot_be_republished(
     assert!(matches!(session.status(), IndexingStatus::Failed { .. }));
     assert!(Arc::ptr_eq(&old, &session.current().unwrap()));
     explain_main(&old);
+    report_generation("reader after acquisition failure", &old, session.status());
     std::fs::write(
         build.directory.join("main.ll"),
         "declare void @worker()\ndefine void @main() {\n call void @worker()\n ret void\n}\n",

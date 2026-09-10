@@ -51,7 +51,8 @@ continue to refer to the complete old generation and can still expand their
 explanation handles or be exported independently.
 
 A failed acquisition, extraction, or validation keeps both the last published
-snapshot and its successful cache. A concurrent or reentrant writer is rejected.
+snapshot and its successful cache. A concurrent or reentrant writer is rejected
+with a returned error, without invoking its callback or changing session status.
 The `status()` method and callback report indexing counts, preparation for
 publication, successful publication, or a failure independently of query results.
 `Publishing` means the candidate is coherent but the pointer has not switched;
@@ -83,11 +84,8 @@ A new process starts with an empty cache. Retaining handles keeps old generation
 in memory; dropping them releases those snapshots. The cache retains only the
 last successful generation's selected artifacts and observations.
 
-As with declared-build ingestion, the build producer must supply coherent,
-finished artifacts and declare their association with source, generated inputs,
-compiler arguments, and target membership. Gloom does not rebuild source or
-watch headers; unchanged `.ll` evidence is reusable even when archived source
-files are unavailable. It does not detect a producer rewriting multiple artifacts
-mid-acquisition. Build capture remains #9. Publication and index reconstruction
+The [declared-build trust contract](declared-build.md#evidence-and-limits)
+applies to every attempt. Unchanged `.ll` evidence is reusable even when archived
+source files are unavailable. Publication and index reconstruction
 still process the whole selected target; this change saves acquisition material
 and LLVM parsing/analysis for unchanged compilations, not all indexing work.
