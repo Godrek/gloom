@@ -228,7 +228,13 @@ fn resolved(base: &Path, path: &str) -> String {
     base.join(path).to_string_lossy().into_owned()
 }
 
-pub(crate) fn publish(path: &Path, target: &str) -> Result<PublishedSnapshot, String> {
+pub(crate) struct SelectedBuild {
+    pub manifest_path: String,
+    pub declaration: DeclaredBuild,
+    pub context: ObservationContext,
+}
+
+pub(crate) fn select(path: &Path, target: &str) -> Result<SelectedBuild, String> {
     let mut declaration = load(path)?;
     let selected = declaration
         .targets
@@ -270,12 +276,46 @@ pub(crate) fn publish(path: &Path, target: &str) -> Result<PublishedSnapshot, St
         &identity.version,
         &declaration.analysis_stage,
     );
-    let contributions = declaration
+    Ok(SelectedBuild {
+        manifest_path: manifest_path.to_string_lossy().into_owned(),
+        declaration,
+        context,
+    })
+}
+
+impl SelectedBuild {
+    pub(crate) fn publish(
+        self,
+        contributions: Vec<crate::EvidenceContribution>,
+    ) -> Result<PublishedSnapshot, String> {
+        let snapshot = crate::snapshot::publish(
+            contributions,
+            LlvmTextContributor::new("clang", &[]).identity(),
+            self.context,
+        )?;
+        let acquisition = DeclaredBuildAcquisition {
+            manifest_path: self.manifest_path,
+            declaration: self.declaration,
+            acquired_input_ids: snapshot
+                .acquired_inputs()
+                .iter()
+                .map(|input| input.id.clone())
+                .collect(),
+        };
+        snapshot.with_declared_build(acquisition)
+    }
+}
+
+pub(crate) fn publish(path: &Path, target: &str) -> Result<PublishedSnapshot, String> {
+    let selected = select(path, target)?;
+    let contributor = LlvmTextContributor::new("clang", &[]);
+    let contributions = selected
+        .declaration
         .compilations
         .iter()
         .map(|compilation| {
             contributor
-                .contribute(Path::new(&compilation.evidence_artifact), &context)
+                .contribute(Path::new(&compilation.evidence_artifact), &selected.context)
                 .map_err(|error| {
                     format!(
                         "declared-build acquisition gap for compilation '{}': {error}",
@@ -284,15 +324,5 @@ pub(crate) fn publish(path: &Path, target: &str) -> Result<PublishedSnapshot, St
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let snapshot = crate::snapshot::publish(contributions, identity, context)?;
-    let acquisition = DeclaredBuildAcquisition {
-        manifest_path: manifest_path.to_string_lossy().into_owned(),
-        declaration,
-        acquired_input_ids: snapshot
-            .acquired_inputs()
-            .iter()
-            .map(|input| input.id.clone())
-            .collect(),
-    };
-    snapshot.with_declared_build(acquisition)
+    selected.publish(contributions)
 }

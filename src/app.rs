@@ -55,6 +55,11 @@ pub enum QueryResult {
 }
 
 impl Application {
+    /// Start an incremental declared-build publication boundary shared by readers.
+    pub fn publication_session(&self) -> crate::publication::PublicationSession {
+        crate::publication::PublicationSession::default()
+    }
+
     /// List the targets explicitly supplied by a local build declaration.
     pub fn declared_build_targets(
         &self,
