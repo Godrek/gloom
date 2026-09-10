@@ -178,7 +178,7 @@ impl DeclaredBuildAcquisition {
                 &declaration.build_configuration,
                 &declaration.toolchain,
                 contributor.name,
-                contributor.version,
+                &context.extraction_version,
                 &declaration.analysis_stage,
             )
         {

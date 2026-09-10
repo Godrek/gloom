@@ -1,5 +1,5 @@
 use gloom::app::{Application, NamedQuery};
-use gloom::{CallableSelector, PublishedSnapshot};
+use gloom::{CallableSelector, ObservationContext, PublishedSnapshot};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -138,6 +138,72 @@ fn selects_membership_before_publishing_and_retains_build_evidence() {
     );
     let exported = Application.export_snapshot_json(&server).unwrap();
     assert_eq!(Application.load_snapshot_json(&exported).unwrap(), server);
+}
+
+#[test]
+fn reload_preserves_historical_extraction_version_and_validates_context() {
+    let snapshot = Application
+        .publish_declared_build(&fixture(), "server")
+        .unwrap();
+    let context = &snapshot.observation_contexts()[0];
+    let historical = ObservationContext::static_analysis(
+        context.program_snapshot_id.as_str(),
+        &context.build_target,
+        &context.build_configuration,
+        &context.toolchain,
+        &context.extraction_method,
+        "0.0.1",
+        &context.analysis_stage,
+    );
+    assert_ne!(historical.extraction_version, context.extraction_version);
+    let exported = Application.export_snapshot_json(&snapshot).unwrap();
+    let mut value: Value = serde_json::from_str(&exported.replace(
+        &serde_json::to_string(&context.id).unwrap(),
+        &serde_json::to_string(&historical.id).unwrap(),
+    ))
+    .unwrap();
+    value["observation_contexts"][0] = serde_json::to_value(&historical).unwrap();
+    let loaded = Application.load_snapshot_json(&value.to_string()).unwrap();
+    assert_eq!(loaded.observation_contexts(), &[historical]);
+    assert_eq!(names(&loaded), names(&snapshot));
+    assert_eq!(
+        Application
+            .load_snapshot_json(&Application.export_snapshot_json(&loaded).unwrap())
+            .unwrap(),
+        loaded
+    );
+
+    for field in [
+        "program_snapshot_id",
+        "build_configuration",
+        "toolchain",
+        "analysis_stage",
+    ] {
+        let mut corrupted = value.clone();
+        corrupted["declared_build"]["declaration"][field] = json!("another");
+        let error = Application
+            .load_snapshot_json(&corrupted.to_string())
+            .unwrap_err();
+        assert!(error.contains("disagrees with observation context"), "{error}");
+    }
+    let mut corrupted = value.clone();
+    corrupted["declared_build"]["declaration"]["targets"][0]["name"] = json!("another");
+    assert!(
+        Application
+            .load_snapshot_json(&corrupted.to_string())
+            .unwrap_err()
+            .contains("disagrees with observation context")
+    );
+    for (field, invalid) in [("extraction_version", ""), ("id", "unqualified")] {
+        let mut corrupted = value.clone();
+        corrupted["observation_contexts"][0][field] = json!(invalid);
+        assert!(
+            Application
+                .load_snapshot_json(&corrupted.to_string())
+                .is_err(),
+            "{field}"
+        );
+    }
 }
 
 #[test]
