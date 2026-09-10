@@ -1,0 +1,88 @@
+{
+  "schema_version": "1",
+  "program_snapshot_id": "declared-build-fixture-v1",
+  "build_configuration": "debug; FEATURE=1",
+  "toolchain": "Clang 18.1.8 / LLVM 18",
+  "analysis_stage": "per-translation-unit LLVM IR before linking",
+  "compilations": [
+    {
+      "id": "server-main",
+      "working_directory": "build",
+      "source_input": "../main.c",
+      "compiler_arguments": [
+        "clang",
+        "-S",
+        "-emit-llvm",
+        "-O0",
+        "-DFEATURE=1",
+        "-Igenerated",
+        "../main.c",
+        "-o",
+        "main.ll"
+      ],
+      "evidence_artifact": "main.ll",
+      "generated_inputs": [
+        {
+          "path": "generated/config.h",
+          "kind": "configured"
+        }
+      ]
+    },
+    {
+      "id": "generated-worker",
+      "working_directory": "build",
+      "source_input": "generated/worker.c",
+      "compiler_arguments": [
+        "clang",
+        "-S",
+        "-emit-llvm",
+        "-O0",
+        "-DFEATURE=1",
+        "-Igenerated",
+        "generated/worker.c",
+        "-o",
+        "worker.ll"
+      ],
+      "evidence_artifact": "worker.ll",
+      "generated_inputs": [
+        {
+          "path": "generated/worker.c",
+          "kind": "generated"
+        }
+      ]
+    },
+    {
+      "id": "other-tool",
+      "working_directory": "build",
+      "source_input": "../other.c",
+      "compiler_arguments": [
+        "clang",
+        "-S",
+        "-emit-llvm",
+        "-O0",
+        "-DFEATURE=1",
+        "-Igenerated",
+        "../other.c",
+        "-o",
+        "other.ll"
+      ],
+      "evidence_artifact": "other.ll",
+      "generated_inputs": []
+    }
+  ],
+  "targets": [
+    {
+      "name": "server",
+      "compilation_ids": [
+        "server-main",
+        "generated-worker"
+      ]
+    },
+    {
+      "name": "other-tool",
+      "compilation_ids": [
+        "other-tool"
+      ]
+    }
+  ]
+}

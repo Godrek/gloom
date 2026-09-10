@@ -10,6 +10,9 @@ validates only a small part of that direction.
 
 ## Current capabilities
 
+- Ingest [declared build evidence](docs/declared-build.md) from local manifests,
+  select an explicitly declared target, and retain compilation and generated-input
+  records alongside its evidence-backed snapshot.
 - Compile one or more C files to textual LLVM IR with Clang.
 - Ingest existing `.ll` files.
 - Extract direct calls and retain unresolved indirect calls explicitly. A call
