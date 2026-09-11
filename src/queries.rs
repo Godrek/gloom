@@ -228,18 +228,14 @@ impl Evaluation<'_> {
             }
             // One manifestation per result keeps duplicate labels and contexts
             // distinguishable without an unbounded nested manifestation list.
-            for manifestation in self
-                .snapshot
-                .manifestations()
-                .iter()
-                .filter(|m| m.entity_id == entity.id)
-            {
+            for manifestation in self.snapshot.manifestations() {
                 if !self.step() {
                     return;
                 }
-                if !self
-                    .contexts
-                    .contains(&manifestation.observation_context_id)
+                if manifestation.entity_id != entity.id
+                    || !self
+                        .contexts
+                        .contains(&manifestation.observation_context_id)
                 {
                     continue;
                 }

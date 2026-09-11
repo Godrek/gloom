@@ -150,6 +150,31 @@ fn relationships(result: &BoundedQueryResult) -> Vec<&CallRelationship> {
 }
 
 #[test]
+fn callable_search_counts_manifestations_before_identity_filtering() {
+    let snapshot = Application
+        .publish_snapshot(
+            &[input("search-scan.ll")],
+            context(),
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let mut query = request(Investigation::CallableSearch {
+        label: String::new(),
+    });
+    query.bounds.max_steps = 6;
+    let bounded = run(&snapshot, &query);
+    assert_eq!(bounded.steps, 6);
+    assert_eq!(bounded.truncation, vec!["max-steps"]);
+    assert!(bounded.items.len() < 3);
+
+    query.bounds.max_steps = 12;
+    let complete = run(&snapshot, &query);
+    assert_eq!(complete.steps, 12);
+    assert!(complete.truncation.is_empty());
+    assert_eq!(complete.items.len(), 3);
+}
+
+#[test]
 fn scopes_search_and_selection_and_keeps_duplicate_labels_distinguishable() {
     let snapshot = snapshot();
     let mut query = request(Investigation::CallableSearch {
