@@ -21,6 +21,8 @@ pub enum Query {
     ShortestPath { start: String, end: String },
 }
 
+/// Compatibility queries for the original standalone snapshot viewer and CLI.
+/// New adapters should use `investigate_snapshot` with an explicit `BoundedQuery`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NamedQuery {
     CallableSearch {
@@ -55,6 +57,15 @@ pub enum QueryResult {
 }
 
 impl Application {
+    /// Execute a bounded, explicitly scoped investigation shared by CLI and services.
+    pub fn investigate_snapshot(
+        &self,
+        snapshot: &PublishedSnapshot,
+        query: &crate::queries::BoundedQuery,
+    ) -> Result<crate::queries::BoundedQueryResult, String> {
+        crate::queries::execute(snapshot, query)
+    }
+
     /// Start an incremental declared-build publication boundary shared by readers.
     pub fn publication_session(&self) -> crate::publication::PublicationSession {
         crate::publication::PublicationSession::default()

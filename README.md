@@ -40,6 +40,9 @@ validates only a small part of that direction.
   sites. Search results include the acquired input, scoped contributor identity,
   and declaration behind each match so same-named local callables can be
   selected by program-entity identity.
+- Run [bounded named investigations](docs/bounded-queries.md) with explicit target
+  and context scope, resolution policies, result/work limits, and definite versus
+  potential recursive cycles through the shared Rust and `investigate` interface.
 - Expand compact call-site explanation handles into evidence, target
   derivations, and cross-context correspondence claims.
 
@@ -50,11 +53,11 @@ LLVM contributor's scoped identity evidence; readable symbol spellings remain
 labels in exports and query results. It still merges all unresolved indirect
 calls into one placeholder and treats all stored relationships alike during
 traversal. The evidence-backed snapshot path preserves indirect call sites
-independently. Its current named caller/callee queries are one-hop and its
+independently. Its compatibility named caller/callee queries are one-hop and their
 shortest directed call path requires an explicit relationship bound (maximum
 1,000). They use the published call-graph projection's target claims across its
 contexts; context filters, resolution policies, and broader bounded-query
-policies remain deferred to the full named-query work. The legacy `call_count`
+policies are available through the bounded `investigate` interface. The legacy `call_count`
 is a count of merged static occurrences, not runtime invocations. Its
 zero-incoming function query is not a semantic entry-point analysis.
 

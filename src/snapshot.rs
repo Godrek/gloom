@@ -613,7 +613,8 @@ pub struct SearchedCallable {
 /// A display name is a label, so it is never required: an entity identity
 /// selects on its own, and a label selects only when it names exactly one
 /// callable. Supplying both checks them against each other.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallableSelector {
     pub label: Option<String>,
     pub entity_id: Option<ProgramEntityId>,
@@ -912,26 +913,29 @@ impl PublishedSnapshot {
                 .manifestations
                 .iter()
                 .filter(|manifestation| manifestation.entity_id == entity.id)
-                .map(|manifestation| {
-                    let acquired_input = self
-                        .acquired_inputs
-                        .iter()
-                        .find(|input| input.id == manifestation.acquired_input_id)
-                        .expect("validated manifestation must name an acquired input");
-                    SearchedCallableManifestation {
-                        manifestation_id: manifestation.id.clone(),
-                        contributor_callable_identity: manifestation
-                            .contributor_callable_identity
-                            .clone(),
-                        acquired_input_id: manifestation.acquired_input_id.clone(),
-                        acquired_input_path: acquired_input.path.clone(),
-                        observation_context_id: manifestation.observation_context_id.clone(),
-                        representation: manifestation.representation.clone(),
-                        defined: manifestation.defined,
-                        declaration: self.callable_declaration(&manifestation.id),
-                    }
-                })
+                .map(|manifestation| self.searched_manifestation(manifestation))
                 .collect(),
+        }
+    }
+
+    pub(crate) fn searched_manifestation(
+        &self,
+        manifestation: &Manifestation,
+    ) -> SearchedCallableManifestation {
+        let acquired_input = self
+            .acquired_inputs
+            .iter()
+            .find(|input| input.id == manifestation.acquired_input_id)
+            .expect("validated manifestation must name an acquired input");
+        SearchedCallableManifestation {
+            manifestation_id: manifestation.id.clone(),
+            contributor_callable_identity: manifestation.contributor_callable_identity.clone(),
+            acquired_input_id: manifestation.acquired_input_id.clone(),
+            acquired_input_path: acquired_input.path.clone(),
+            observation_context_id: manifestation.observation_context_id.clone(),
+            representation: manifestation.representation.clone(),
+            defined: manifestation.defined,
+            declaration: self.callable_declaration(&manifestation.id),
         }
     }
 

@@ -5,6 +5,7 @@ mod contributor;
 mod llvm;
 mod model;
 pub mod publication;
+pub mod queries;
 mod snapshot;
 mod viewer;
 

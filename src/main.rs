@@ -26,6 +26,13 @@ const EXPLAIN_KIND: &[&str] = &["explain"];
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a bounded named query with an explicit target, context, and resolution policy.
+    Investigate {
+        snapshot: PathBuf,
+        /// JSON BoundedQuery request; generic traversal and omitted scope are rejected.
+        #[arg(long)]
+        request: PathBuf,
+    },
     /// List targets in a local declared-build manifest.
     BuildTargets { manifest: PathBuf },
     /// Ingest existing LLVM IR artifacts for one explicitly declared build target.
@@ -350,6 +357,16 @@ fn run() -> Result<(), String> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+            );
+        }
+        Commands::Investigate { snapshot, request } => {
+            let published = application.load_snapshot_json(&read(&snapshot)?)?;
+            let query: gloom::queries::BoundedQuery = serde_json::from_str(&read(&request)?)
+                .map_err(|error| format!("{}: {error}", request.display()))?;
+            let result = application.investigate_snapshot(&published, &query)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
             );
         }
         Commands::ViewSnapshot { snapshot, output } => {
