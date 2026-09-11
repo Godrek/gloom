@@ -274,7 +274,10 @@ impl Evaluation<'_> {
             if metered && !self.step() {
                 return None;
             }
-            if !self.contexts.contains(&target.target_observation_context_id) {
+            if !self
+                .contexts
+                .contains(&target.target_observation_context_id)
+            {
                 return Some(true);
             }
         }
@@ -491,7 +494,9 @@ impl Evaluation<'_> {
             if site.call_site_id != *id {
                 continue;
             }
-            if !self.contexts.contains(&site.resolution_observation_context_id)
+            if !self
+                .contexts
+                .contains(&site.resolution_observation_context_id)
                 || site.resolution != Resolution::Complete
             {
                 return Some(false);
