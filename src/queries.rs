@@ -251,19 +251,34 @@ impl Evaluation<'_> {
     }
 
     fn emit_site(&mut self, site: &crate::ProjectedCallSite, unattributed: bool) -> bool {
+        let Some(targets_omitted_by_scope) = self.targets_omitted_by_scope(site, true) else {
+            return false;
+        };
         self.emit(InvestigationItem::CallSite {
             call_site_id: site.call_site_id.clone(),
             caller_entity_id: site.caller_entity_id.clone(),
             observation_context_id: site.resolution_observation_context_id.clone(),
             resolution: site.resolution,
-            targets_omitted_by_scope: site.targets.iter().any(|target| {
-                !self
-                    .contexts
-                    .contains(&target.target_observation_context_id)
-            }),
+            targets_omitted_by_scope,
             unattributed,
             explanation_handle: site.explanation_handle.clone(),
         })
+    }
+
+    fn targets_omitted_by_scope(
+        &mut self,
+        site: &crate::ProjectedCallSite,
+        metered: bool,
+    ) -> Option<bool> {
+        for target in &site.targets {
+            if metered && !self.step() {
+                return None;
+            }
+            if !self.contexts.contains(&target.target_observation_context_id) {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 
     fn expand(&mut self, start: ProgramEntityId, incoming: bool) {
@@ -281,12 +296,21 @@ impl Evaluation<'_> {
                     continue;
                 }
                 let relevant = if incoming {
-                    site.targets.iter().any(|target| {
-                        target.callee_entity_id == entity
+                    let mut relevant = false;
+                    for target in &site.targets {
+                        if !self.step() {
+                            return;
+                        }
+                        if target.callee_entity_id == entity
                             && self
                                 .contexts
                                 .contains(&target.target_observation_context_id)
-                    })
+                        {
+                            relevant = true;
+                            break;
+                        }
+                    }
+                    relevant
                 } else {
                     site.caller_entity_id == entity
                 };
@@ -429,7 +453,17 @@ impl Evaluation<'_> {
                     .chain([relationship])
                     .cloned()
                     .collect();
-                let closed = cycle.iter().all(|r| self.closed_site(&r.call_site_id));
+                let mut closed = true;
+                for relationship in &cycle {
+                    match self.closed_site(&relationship.call_site_id, true) {
+                        Some(true) => {}
+                        Some(false) => {
+                            closed = false;
+                            break;
+                        }
+                        None => return,
+                    }
+                }
                 let scope = closed.then(|| cycle.iter().map(|r| r.call_site_id.clone()).collect());
                 if !self.emit(InvestigationItem::Cycle {
                     classification: if closed {
@@ -449,22 +483,24 @@ impl Evaluation<'_> {
         }
     }
 
-    fn closed_site(&self, id: &ProgramEntityId) -> bool {
-        self.snapshot
-            .call_graph_projection()
-            .call_sites
-            .iter()
-            .any(|site| {
-                site.call_site_id == *id
-                    && self
-                        .contexts
-                        .contains(&site.resolution_observation_context_id)
-                    && site.resolution == Resolution::Complete
-                    && site.targets.iter().all(|target| {
-                        self.contexts
-                            .contains(&target.target_observation_context_id)
-                    })
-            })
+    fn closed_site(&mut self, id: &ProgramEntityId, metered: bool) -> Option<bool> {
+        for site in &self.snapshot.call_graph_projection().call_sites {
+            if metered && !self.step() {
+                return None;
+            }
+            if site.call_site_id != *id {
+                continue;
+            }
+            if !self.contexts.contains(&site.resolution_observation_context_id)
+                || site.resolution != Resolution::Complete
+            {
+                return Some(false);
+            }
+            return self
+                .targets_omitted_by_scope(site, metered)
+                .map(|omitted| !omitted);
+        }
+        Some(false)
     }
 }
 
@@ -544,7 +580,9 @@ pub(crate) fn execute(
         if sites.is_empty()
             || sites.len() > request.bounds.max_results
             || sites.len() != call_site_ids.len()
-            || sites.iter().any(|id| !evaluation.closed_site(id))
+            || sites
+                .iter()
+                .any(|id| evaluation.closed_site(id, false) != Some(true))
         {
             return Err("closed-call-sites requires 1..=max_results nonrepeated recorded sites with complete resolution and all target contexts selected; completeness bases are available through their explanations".into());
         }

@@ -133,7 +133,8 @@ reachable neighborhood are found by choosing a starting point on those cycles.
   relationships; a search item has one manifestation. Closure handles are
   separately bounded by the explicit closure list.
 - `max_steps`: 1–1,000,000 scanned entity/manifestation or projection records
-  during the investigation. Repeated scans count again. This limits traversal
+  during the investigation, including nested call-site target scans and cycle
+  classification. Repeated scans count again. This limits traversal
   and dense cycle enumeration, not snapshot loading, scope/selector validation,
   evidence lookup, string sizes, or wall-clock time.
 

@@ -175,6 +175,83 @@ fn callable_search_counts_manifestations_before_identity_filtering() {
 }
 
 #[test]
+fn expansion_budgets_include_target_matching_and_site_classification() {
+    let snapshot = Application
+        .publish_snapshot(
+            &[input("scan-self.ll")],
+            context(),
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    for (investigation, scans_before_emission) in [
+        (Investigation::Callees { caller: label("self") }, 1),
+        (Investigation::Callers { callee: label("self") }, 2),
+    ] {
+        let mut query = request(investigation);
+        for budget in 1..=scans_before_emission {
+            query.bounds.max_steps = budget;
+            let result = run(&snapshot, &query);
+            assert_eq!(result.steps, budget);
+            assert_eq!(result.truncation, vec!["max-steps"]);
+            assert!(result.items.is_empty());
+        }
+        query.bounds.max_steps = scans_before_emission + 1;
+        let result = run(&snapshot, &query);
+        assert_eq!(result.steps, query.bounds.max_steps);
+        assert_eq!(result.truncation, vec!["max-steps"]);
+        assert_eq!(result.items.len(), 1);
+        assert!(matches!(
+            result.items[0],
+            InvestigationItem::CallSite {
+                targets_omitted_by_scope: false,
+                unattributed: false,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn cycle_classification_exhaustion_never_emits_a_potential_cycle() {
+    let snapshot = Application
+        .publish_snapshot(
+            &[input("scan-self.ll")],
+            context(),
+            &LlvmTextContributor::new("clang", &[]),
+        )
+        .unwrap();
+    let mut query = request(Investigation::RecursiveCycles { start: label("self") });
+    for world in [
+        WorldPolicy::Open,
+        WorldPolicy::ClosedCallSites {
+            call_site_ids: vec![snapshot.call_graph_projection().call_sites[0].call_site_id.clone()],
+        },
+    ] {
+        query.world = world;
+        for budget in 1..=2 {
+            query.bounds.max_steps = budget;
+            let result = run(&snapshot, &query);
+            assert_eq!(result.steps, budget);
+            assert_eq!(result.truncation, vec!["max-steps"]);
+            assert!(result.items.is_empty());
+        }
+        query.bounds.max_steps = 3;
+        let result = run(&snapshot, &query);
+        assert_eq!(result.steps, 3);
+        assert!(result.truncation.is_empty());
+        assert_eq!(result.items.len(), 1);
+        assert!(matches!(
+            &result.items[0],
+            InvestigationItem::Cycle {
+                classification: CycleClassification::DefiniteRecursiveCycle,
+                closed_call_site_scope: Some(sites),
+                ..
+            } if sites.len() == 1
+        ));
+    }
+}
+
+#[test]
 fn scopes_search_and_selection_and_keeps_duplicate_labels_distinguishable() {
     let snapshot = snapshot();
     let mut query = request(Investigation::CallableSearch {
