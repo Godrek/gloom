@@ -184,8 +184,18 @@ fn expansion_budgets_include_target_matching_and_site_classification() {
         )
         .unwrap();
     for (investigation, scans_before_emission) in [
-        (Investigation::Callees { caller: label("self") }, 1),
-        (Investigation::Callers { callee: label("self") }, 2),
+        (
+            Investigation::Callees {
+                caller: label("self"),
+            },
+            1,
+        ),
+        (
+            Investigation::Callers {
+                callee: label("self"),
+            },
+            2,
+        ),
     ] {
         let mut query = request(investigation);
         for budget in 1..=scans_before_emission {
@@ -220,11 +230,17 @@ fn cycle_classification_exhaustion_never_emits_a_potential_cycle() {
             &LlvmTextContributor::new("clang", &[]),
         )
         .unwrap();
-    let mut query = request(Investigation::RecursiveCycles { start: label("self") });
+    let mut query = request(Investigation::RecursiveCycles {
+        start: label("self"),
+    });
     for world in [
         WorldPolicy::Open,
         WorldPolicy::ClosedCallSites {
-            call_site_ids: vec![snapshot.call_graph_projection().call_sites[0].call_site_id.clone()],
+            call_site_ids: vec![
+                snapshot.call_graph_projection().call_sites[0]
+                    .call_site_id
+                    .clone(),
+            ],
         },
     ] {
         query.world = world;
