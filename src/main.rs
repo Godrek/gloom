@@ -131,6 +131,15 @@ enum Commands {
         #[arg(long, conflicts_with_all = CALLEES_KIND.iter().chain(CALLERS_KIND).chain(CALL_PATH_KIND).collect::<Vec<_>>())]
         explain: Option<String>,
     },
+    /// Serve a published snapshot to a local bounded-projection viewer.
+    ///
+    /// The service listens on the loopback interface only and answers the same
+    /// bounded named queries as `investigate`. It never returns the snapshot.
+    Serve {
+        snapshot: PathBuf,
+        #[arg(short, long, default_value_t = 7878)]
+        port: u16,
+    },
     /// Render a published snapshot as a self-contained evidence viewer.
     ViewSnapshot {
         snapshot: PathBuf,
@@ -339,14 +348,7 @@ fn run() -> Result<(), String> {
                     },
                 )?)
             } else if let Some(handle) = explain {
-                let explanation_handle = published
-                    .call_graph_projection()
-                    .call_sites
-                    .iter()
-                    .find(|call_site| call_site.explanation_handle.as_str() == handle)
-                    .map(|call_site| &call_site.explanation_handle)
-                    .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
-                serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
+                serde_json::to_value(application.expand_explanation(&published, &handle)?)
             } else {
                 return Err(
                     "select a query: --search-callables, --callees, --callers, --call-path, or --explain"
@@ -368,6 +370,18 @@ fn run() -> Result<(), String> {
                 "{}",
                 serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
             );
+        }
+        Commands::Serve { snapshot, port } => {
+            let published = application
+                .load_snapshot_json(&read(&snapshot)?)
+                .map_err(|error| format!("{}: {error}", snapshot.display()))?;
+            let snapshot_id = published.program_snapshot().id.clone();
+            let service = application.local_query_service(published).bind(port)?;
+            println!(
+                "Serving snapshot {snapshot_id} at http://{}/",
+                service.local_addr()?
+            );
+            service.serve()?;
         }
         Commands::ViewSnapshot { snapshot, output } => {
             let published = application

@@ -66,6 +66,42 @@ impl Application {
         crate::queries::execute(snapshot, query)
     }
 
+    /// Report the targets, observation contexts, and limits a bounded
+    /// investigation must select within.
+    pub fn investigation_scope(
+        &self,
+        snapshot: &PublishedSnapshot,
+    ) -> crate::queries::InvestigationScope {
+        crate::queries::scope(snapshot)
+    }
+
+    /// Expand an explanation handle a query result reported into its evidence.
+    ///
+    /// The handle arrives as text from an adapter, so it is matched against the
+    /// handles the projection actually published rather than parsed.
+    pub fn expand_explanation(
+        &self,
+        snapshot: &PublishedSnapshot,
+        handle: &str,
+    ) -> Result<Explanation, String> {
+        let handle = snapshot
+            .call_graph_projection()
+            .call_sites
+            .iter()
+            .find(|call_site| call_site.explanation_handle.as_str() == handle)
+            .map(|call_site| &call_site.explanation_handle)
+            .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
+        self.explain_snapshot(snapshot, handle)
+    }
+
+    /// Serve bounded investigations of one pinned snapshot to a local viewer.
+    pub fn local_query_service(
+        &self,
+        snapshot: PublishedSnapshot,
+    ) -> crate::service::LocalQueryService {
+        crate::service::LocalQueryService::new(snapshot)
+    }
+
     /// Start an incremental declared-build publication boundary shared by readers.
     pub fn publication_session(&self) -> crate::publication::PublicationSession {
         crate::publication::PublicationSession::default()

@@ -149,5 +149,17 @@ nonzero exit code; successful structured results go to stdout.
 The initial implementation scans the validated in-memory projection and reuses
 its identities and explanation handles. Breadth-first path search stores
 predecessors, and cycle enumeration stores one active depth-first path. It does
-not copy the whole snapshot into the result. Dedicated lookup indexes and the
-local viewer service can build on this shared query contract.
+not copy the whole snapshot into the result. Dedicated lookup indexes can build
+on this shared query contract.
+
+## Adapters
+
+`Application::investigation_scope` reports the build targets, their observation
+contexts, and the bounds limits above, so an adapter offers a selectable scope
+without restating limits the core enforces or transferring the snapshot.
+`Application::expand_explanation` resolves a handle reported by a result.
+
+The [local viewer](local-viewer.md) is one such adapter: `gloom serve` answers
+these same requests over a loopback HTTP endpoint for a browser page. Its caller,
+callee, path, resolution, and filtering semantics are this document's, because
+it executes the same requests through the same seam.

@@ -41,6 +41,25 @@ pub struct QueryBounds {
     pub max_steps: usize,
 }
 
+/// The largest bounds a request may declare. Every adapter reports these rather
+/// than restating limits the core enforces.
+pub const MAXIMUM_BOUNDS: QueryBounds = QueryBounds {
+    max_depth: 100,
+    max_results: 10_000,
+    max_steps: 1_000_000,
+};
+
+/// A starting point for interactive exploration, small enough that a first
+/// request returns a focused neighborhood rather than a whole projection.
+pub const DEFAULT_BOUNDS: QueryBounds = QueryBounds {
+    max_depth: 2,
+    max_results: 200,
+    max_steps: 100_000,
+};
+
+/// The largest number of observation contexts one request may select.
+pub const MAXIMUM_OBSERVATION_CONTEXTS: usize = 100;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Investigation {
@@ -131,6 +150,54 @@ pub struct BoundedQueryResult {
     pub returned_static_call_site_cardinality: usize,
     /// No result in this API measures runtime invocation frequency.
     pub runtime_invocation_measure: Option<u64>,
+}
+
+/// One build target a published snapshot observed, with the observation
+/// contexts a request may select within it.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScopedBuildTarget {
+    pub build_target: String,
+    pub observation_contexts: Vec<ObservationContext>,
+}
+
+/// What a person must select before a bounded investigation can run, and the
+/// limits the core will enforce on it.
+///
+/// An adapter offers this instead of transferring the snapshot: it names the
+/// selectable targets and contexts without exposing entities, call sites, or
+/// claims.
+#[derive(Clone, Debug, Serialize)]
+pub struct InvestigationScope {
+    pub program_snapshot_id: ProgramSnapshotId,
+    pub snapshot_schema_version: String,
+    pub build_targets: Vec<ScopedBuildTarget>,
+    pub maximum_bounds: QueryBounds,
+    pub default_bounds: QueryBounds,
+    pub maximum_observation_contexts: usize,
+}
+
+pub(crate) fn scope(snapshot: &PublishedSnapshot) -> InvestigationScope {
+    let mut targets: BTreeMap<&str, Vec<ObservationContext>> = BTreeMap::new();
+    for context in snapshot.observation_contexts() {
+        targets
+            .entry(context.build_target.as_str())
+            .or_default()
+            .push(context.clone());
+    }
+    InvestigationScope {
+        program_snapshot_id: snapshot.program_snapshot().id.clone(),
+        snapshot_schema_version: snapshot.schema_version().to_owned(),
+        build_targets: targets
+            .into_iter()
+            .map(|(build_target, observation_contexts)| ScopedBuildTarget {
+                build_target: build_target.to_owned(),
+                observation_contexts,
+            })
+            .collect(),
+        maximum_bounds: MAXIMUM_BOUNDS,
+        default_bounds: DEFAULT_BOUNDS,
+        maximum_observation_contexts: MAXIMUM_OBSERVATION_CONTEXTS,
+    }
 }
 
 struct Evaluation<'a> {
@@ -516,14 +583,14 @@ pub(crate) fn execute(
     request: &BoundedQuery,
 ) -> Result<BoundedQueryResult, String> {
     let bounds = &request.bounds;
-    if !(1..=100).contains(&bounds.max_depth)
-        || !(1..=10_000).contains(&bounds.max_results)
-        || !(1..=1_000_000).contains(&bounds.max_steps)
+    if !(1..=MAXIMUM_BOUNDS.max_depth).contains(&bounds.max_depth)
+        || !(1..=MAXIMUM_BOUNDS.max_results).contains(&bounds.max_results)
+        || !(1..=MAXIMUM_BOUNDS.max_steps).contains(&bounds.max_steps)
     {
-        return Err(
-            "bounds require max_depth 1..=100, max_results 1..=10000, and max_steps 1..=1000000"
-                .into(),
-        );
+        return Err(format!(
+            "bounds require max_depth 1..={}, max_results 1..={}, and max_steps 1..={}",
+            MAXIMUM_BOUNDS.max_depth, MAXIMUM_BOUNDS.max_results, MAXIMUM_BOUNDS.max_steps
+        ));
     }
     let contexts: BTreeSet<_> = request
         .scope
@@ -532,10 +599,12 @@ pub(crate) fn execute(
         .cloned()
         .collect();
     if contexts.is_empty()
-        || contexts.len() > 100
+        || contexts.len() > MAXIMUM_OBSERVATION_CONTEXTS
         || contexts.len() != request.scope.observation_context_ids.len()
     {
-        return Err("select 1..=100 nonrepeated observation context IDs".into());
+        return Err(format!(
+            "select 1..={MAXIMUM_OBSERVATION_CONTEXTS} nonrepeated observation context IDs"
+        ));
     }
     let mut qualified = Vec::new();
     for id in &contexts {
