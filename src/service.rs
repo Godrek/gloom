@@ -18,7 +18,7 @@ use crate::app::Application;
 use crate::snapshot::PublishedSnapshot;
 use serde::Deserialize;
 use serde::Serialize;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
@@ -38,7 +38,15 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// A bounded query request is small; anything larger is refused unread.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_HEADERS: usize = 64;
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// The total time one request may take to arrive.
+///
+/// A per-read timeout does not bound this: a client that sends one byte just
+/// inside each read's timeout keeps every individual read succeeding and holds
+/// the single-threaded accept loop for as long as it likes. The budget is
+/// therefore spent across a whole request, not restarted by each byte.
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
+/// How long writing one response may block on a client that stops reading.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Forbids every external load, so the page cannot acquire code or data from a
 /// network even if one is reachable. Inline style and script are the page's own.
@@ -139,6 +147,7 @@ impl ServiceResponse {
             400 => "Bad Request",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            408 => "Request Timeout",
             411 => "Length Required",
             413 => "Content Too Large",
             _ => "Internal Server Error",
@@ -250,6 +259,7 @@ impl LocalQueryService {
         Ok(BoundLocalQueryService {
             service: self,
             listener,
+            request_deadline: REQUEST_DEADLINE,
         })
     }
 }
@@ -258,15 +268,23 @@ impl LocalQueryService {
 pub struct BoundLocalQueryService {
     service: LocalQueryService,
     listener: TcpListener,
+    request_deadline: Duration,
 }
 
 impl BoundLocalQueryService {
+    /// Cap the total time one request may occupy the service at something
+    /// other than `REQUEST_DEADLINE`.
+    pub fn with_request_deadline(mut self, deadline: Duration) -> Self {
+        self.request_deadline = deadline;
+        self
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr, String> {
         self.listener.local_addr().map_err(|e| e.to_string())
     }
 
-    /// Serve until the listener fails. One connection carries one request, so a
-    /// client that stops reading delays only itself.
+    /// Serve until the listener fails. One connection carries one request, and
+    /// every request has a total time budget, so no client can hold the loop.
     pub fn serve(&self) -> Result<(), String> {
         loop {
             match self.listener.accept() {
@@ -284,19 +302,56 @@ impl BoundLocalQueryService {
     }
 
     fn serve_connection(&self, mut stream: TcpStream) {
-        let _ = stream.set_read_timeout(Some(CONNECTION_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CONNECTION_TIMEOUT));
-        let response = match read_request(&mut stream) {
-            Ok(request) => self.service.respond(&request),
-            Err(refusal) => refusal,
-        };
+        let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
+        let response =
+            match read_request(&mut stream, Deadline::starting_now(self.request_deadline)) {
+                Ok(request) => self.service.respond(&request),
+                Err(refusal) => refusal,
+            };
         let _ = response.write(&mut stream);
         let _ = stream.shutdown(Shutdown::Both);
     }
 }
 
-/// Read one request line by line within an explicit byte budget.
-fn read_line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String, ServiceResponse> {
+/// The instant by which one whole request must have arrived.
+struct Deadline(std::time::Instant);
+
+impl Deadline {
+    fn starting_now(budget: Duration) -> Self {
+        Self(std::time::Instant::now() + budget)
+    }
+
+    /// Give the next blocking read only the time the request has left, so no
+    /// single read can outlive the budget and no sequence of reads can renew it.
+    fn arm(&self, stream: &TcpStream) -> Result<(), ServiceResponse> {
+        let remaining = self.0.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return Err(ServiceResponse::refused(
+                408,
+                "the request did not arrive within the local query service deadline",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A read that ran out of time is a deadline refusal, not a malformed request.
+fn incomplete(error: std::io::Error, malformed: &str) -> ServiceResponse {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => ServiceResponse::refused(
+            408,
+            "the request did not arrive within the local query service deadline",
+        ),
+        _ => ServiceResponse::refused(400, malformed),
+    }
+}
+
+/// Read one request line by line within an explicit byte budget and deadline.
+fn read_line(
+    reader: &mut BufReader<&mut TcpStream>,
+    budget: &mut usize,
+    deadline: &Deadline,
+) -> Result<String, ServiceResponse> {
     let mut line = Vec::new();
     loop {
         if *budget == 0 {
@@ -305,9 +360,14 @@ fn read_line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String, Se
                 "request head exceeds the local query service limit",
             ));
         }
+        // Only an empty buffer means the next byte has to come off the socket,
+        // so the deadline is re-armed exactly when a read could block.
+        if reader.buffer().is_empty() {
+            deadline.arm(reader.get_ref())?;
+        }
         let mut byte = [0u8; 1];
-        if reader.read_exact(&mut byte).is_err() {
-            return Err(ServiceResponse::refused(400, "incomplete request"));
+        if let Err(error) = reader.read_exact(&mut byte) {
+            return Err(incomplete(error, "incomplete request"));
         }
         *budget -= 1;
         if byte[0] == b'\n' {
@@ -321,10 +381,13 @@ fn read_line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String, Se
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<ServiceRequest, ServiceResponse> {
+fn read_request(
+    stream: &mut TcpStream,
+    deadline: Deadline,
+) -> Result<ServiceRequest, ServiceResponse> {
     let mut reader = BufReader::new(stream);
     let mut budget = MAX_HEAD_BYTES;
-    let start = read_line(&mut reader, &mut budget)?;
+    let start = read_line(&mut reader, &mut budget, &deadline)?;
     let mut parts = start.split(' ');
     let (Some(method), Some(target), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(ServiceResponse::refused(400, "malformed request line"));
@@ -333,7 +396,7 @@ fn read_request(stream: &mut TcpStream) -> Result<ServiceRequest, ServiceRespons
     let mut content_length = 0usize;
     let mut headers = 0usize;
     loop {
-        let line = read_line(&mut reader, &mut budget)?;
+        let line = read_line(&mut reader, &mut budget, &deadline)?;
         if line.is_empty() {
             break;
         }
@@ -369,9 +432,19 @@ fn read_request(stream: &mut TcpStream) -> Result<ServiceRequest, ServiceRespons
             _ => {}
         }
     }
+    // Read in chunks rather than with `read_exact`, which would loop over
+    // blocking reads of its own and so escape the request's time budget.
     let mut body = vec![0u8; content_length];
-    if reader.read_exact(&mut body).is_err() {
-        return Err(ServiceResponse::refused(400, "incomplete request body"));
+    let mut filled = 0;
+    while filled < content_length {
+        if reader.buffer().is_empty() {
+            deadline.arm(reader.get_ref())?;
+        }
+        match reader.read(&mut body[filled..]) {
+            Ok(0) => return Err(ServiceResponse::refused(400, "incomplete request body")),
+            Ok(read) => filled += read,
+            Err(error) => return Err(incomplete(error, "incomplete request body")),
+        }
     }
     Ok(ServiceRequest {
         method: method.to_owned(),

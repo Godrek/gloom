@@ -519,6 +519,15 @@ fn the_page_asks_only_bounded_questions_and_renders_what_the_core_answers() {
         .expect("the neighborhood names a callee")
         .to_owned();
 
+    // The same search under a step bound that stops it before it has matched
+    // anything: an empty result that is not an answer about what exists.
+    let truncated_max_steps = 1;
+    let mut truncated = search_a.clone();
+    truncated["bounds"]["max_steps"] = truncated_max_steps.into();
+    let stopped = answer(&truncated);
+    assert!(stopped["items"].as_array().unwrap().is_empty());
+    assert_eq!(stopped["truncation"], serde_json::json!(["max-steps"]));
+
     let input = serde_json::json!({
         "html": String::from_utf8(service.respond(&ServiceRequest::get("/")).body).unwrap(),
         "program_snapshot_id": scope["program_snapshot_id"],
@@ -528,6 +537,7 @@ fn the_page_asks_only_bounded_questions_and_renders_what_the_core_answers() {
         "searches": ["a", "c"],
         "expected_callee": callee,
         "expected_evidence": explanation["evidence_records"][0]["id"],
+        "truncated_max_steps": truncated_max_steps,
         "exchanges": [
             {"path": SCOPE_PATH, "response": scope},
             {"path": INVESTIGATE_PATH, "request": search_a, "response": found_a},
@@ -536,6 +546,7 @@ fn the_page_asks_only_bounded_questions_and_renders_what_the_core_answers() {
              "request": {"explanation_handle": handle}, "response": explanation},
             {"path": INVESTIGATE_PATH, "request": search_c, "response": found_c},
             {"path": INVESTIGATE_PATH, "request": path, "response": traced},
+            {"path": INVESTIGATE_PATH, "request": truncated, "response": stopped},
         ],
     });
     let mut child = std::process::Command::new("node")
@@ -550,6 +561,56 @@ fn the_page_asks_only_bounded_questions_and_renders_what_the_core_answers() {
         .write_all(input.to_string().as_bytes())
         .unwrap();
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn a_trickling_client_cannot_hold_the_service_beyond_one_request_deadline() {
+    let snapshot = snapshot();
+    // A budget short enough to observe; the service's own is fifteen seconds.
+    let deadline = std::time::Duration::from_millis(400);
+    let bound = service(&snapshot)
+        .bind(0)
+        .unwrap()
+        .with_request_deadline(deadline);
+    let address = bound.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            bound.serve_one().unwrap();
+        }
+    });
+
+    // Every byte arrives well inside any single read's timeout, so only a
+    // budget spent across the whole request can stop this client.
+    let head = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    let trickle = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        let mut sent = 0;
+        for byte in head {
+            if stream.write_all(&[*byte]).is_err() || stream.flush().is_err() {
+                break;
+            }
+            sent += 1;
+            std::thread::sleep(deadline / 4);
+        }
+        sent
+    });
+
+    // A well-behaved client must be answered without waiting for the trickle,
+    // which would otherwise occupy the service for more than twenty deadlines.
+    std::thread::sleep(deadline / 4);
+    let started = std::time::Instant::now();
+    let (status, _, _) = over_http(address, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    let waited = started.elapsed();
+    assert_eq!(status, 200);
+    assert!(
+        waited < deadline * 5,
+        "a trickling client held the service for {waited:?}"
+    );
+    assert!(
+        trickle.join().unwrap() < head.len(),
+        "the trickling request was never cut off"
+    );
+    server.join().unwrap();
 }
 
 /// Speak HTTP/1.1 to the service directly, so the test depends on no client.

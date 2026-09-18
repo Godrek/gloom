@@ -288,10 +288,23 @@ function focusOn(entity) {
   renderControls();
 }
 
+/* A bound that stopped a query before it finished says nothing about what it
+   did not reach, so an empty truncated result is reported as the bound it hit
+   rather than as a no-match or an absence in the selected scope. */
+function exhausted(result, stopped, absent) {
+  if (!result.truncation.length) return el('p', {class: 'empty', text: absent});
+  return el('p', {class: 'notice', text:
+    `${stopped} at the ${result.truncation.join(' and ')} bound before reporting anything. ` +
+    'Raise the bound or narrow the request; this is no claim about what exists.'});
+}
+
 function renderMatches(found) {
   const items = found.items.filter(item => item.kind === 'callable');
   if (!items.length) {
-    $('matches').replaceChildren(el('p', {class: 'empty', text: 'No callable matched that label in the selected contexts.'}));
+    $('matches').replaceChildren(
+      exhausted(found, 'The search stopped',
+        'No callable matched that label in the selected contexts.'),
+      truncationNote(found));
     return;
   }
   $('matches').replaceChildren(...items.map(item => {
@@ -341,7 +354,8 @@ function renderResult() {
     : drawNeighborhood(result);
   if (drawn) parts.push(drawn);
   if (!result.items.length) {
-    parts.push(el('p', {class: 'empty', text: 'No record in the selected scope answers this query.'}));
+    parts.push(exhausted(result, 'This investigation stopped',
+      'No record in the selected scope answers this query.'));
   }
   parts.push(...result.items.map((item, index) => renderItem(item, index)));
   $('result').replaceChildren(...parts);

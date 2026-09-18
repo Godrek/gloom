@@ -144,6 +144,19 @@ const button = (id, label) => find(id, node => node.tagName === 'button' && text
   assert.ok($('result').querySelector('.diagram'), 'a focused path is drawn');
   assert.ok(text($('result')).includes('relationship(s)'));
 
+  // A search the step bound stopped returned nothing, but reached nothing
+  // either: the page must report the bound, not claim that nothing matched.
+  $('max-steps').value = input.truncated_max_steps;
+  $('search').value = input.searches[0];
+  await $('search-run').onclick();
+  await settle();
+  const stopped = text($('matches'));
+  assert.ok(stopped.includes('max-steps'), stopped);
+  assert.ok(stopped.includes('stopped at the max-steps bound'), stopped);
+  assert.ok(stopped.includes('no claim about what exists'), stopped);
+  assert.ok(!stopped.includes('No callable matched'),
+    'a truncated search must not be reported as a no-match');
+
   assert.equal(exchanges.length, 0, 'every scripted request was made');
 })().catch(error => {
   console.error(error);

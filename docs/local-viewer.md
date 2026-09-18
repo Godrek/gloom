@@ -38,7 +38,9 @@ published snapshot, and serving a different one means starting the service again
 
 Truncation reasons, executed steps, the declared world policy, and the returned
 static call-site cardinality are shown with every result, so a bounded answer is
-never mistaken for an exhaustive one.
+never mistaken for an exhaustive one. A query a bound stopped before it reported
+anything is shown as the bound it hit, never as a no-match or an absence in the
+selected scope: it reached nothing, so it establishes nothing about what exists.
 
 ## The local service
 
@@ -84,6 +86,13 @@ The service is a local development tool. It has no authentication beyond the
 loopback binding and the `Host` check, answers one request per connection on a
 single thread, reads request heads up to 8 KiB and bodies up to 256 KiB, and is
 not intended to be exposed to other machines or to serve many clients.
+
+Because the accept loop is single-threaded, one request may not hold it open.
+The time budget is spent across a whole request rather than restarted by each
+read, so a client that trickles bytes just inside every individual read's
+timeout is refused with `408` once its deadline passes, and the next client is
+served. `BoundLocalQueryService::with_request_deadline` changes that budget from
+its fifteen-second default.
 
 ## The self-contained export
 
