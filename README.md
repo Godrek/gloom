@@ -13,6 +13,11 @@ validates only a small part of that direction.
 - Ingest [declared build evidence](docs/declared-build.md) from local manifests,
   select an explicitly declared target, and retain compilation and generated-input
   records alongside its evidence-backed snapshot.
+- [Capture a real build](docs/build-capture.md) when declared artifacts do not
+  establish link membership: run the build once under a compiler wrapper, take
+  target membership from the link Gloom observed, and publish the translation
+  units that link named, with the captured arguments, working directories,
+  generated inputs, and toolchain identity. Supported on Linux with Clang only.
 - [Incrementally publish declared builds](docs/incremental-publication.md) through
   an in-process session that reuses unchanged LLVM analysis and atomically switches
   snapshots while readers retain independently queryable prior generations.
@@ -112,6 +117,20 @@ gloom publish tests/fixtures/direct-call.ll \
   --html snapshot.html
 ```
 
+A build whose producer declares nothing can be captured instead. The build runs
+once under a compiler wrapper, and the link Gloom observes establishes the
+published target's membership:
+
+```bash
+gloom capture-build \
+  --project-root tests/fixtures/build-capture \
+  --target server \
+  --snapshot-id build-capture-example-v1 \
+  --capture-dir /tmp/server-capture \
+  -o snapshot.json \
+  -- sh build.sh
+```
+
 Query the stored call-graph projection and expand the returned explanation
 handle without rerunning extraction or reconstructing the relationship:
 
@@ -163,7 +182,10 @@ cargo test
 ```
 
 The LLVM fixture in `tests/fixtures/simple.ll` permits extraction tests without
-invoking Clang. `examples/demo.c` exercises the complete C-to-viewer path.
+invoking Clang. `examples/demo.c` exercises the complete C-to-viewer path. The
+build-capture tests capture the real fixture build in `tests/fixtures/build-capture`;
+without a supported Linux Clang they report that there is no build to capture
+and stop.
 Continuous integration runs formatting, linting, and tests on every push and
 pull request.
 

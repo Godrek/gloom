@@ -84,7 +84,9 @@ the declared compiler argv. Supplying unrelated artifacts under one target would
 be a false declaration. The producer must supply coherent, finished artifacts
 and keep them unchanged throughout acquisition; Gloom does not detect a producer
 rewriting multiple artifacts mid-acquisition. It does not rebuild source or
-watch headers. Capture of a real build is separate work tracked by #9.
+watch headers. A build whose producer supplies no such declaration can instead
+be [captured](build-capture.md), which observes the compilations and the link
+rather than trusting a declaration of them.
 This ingestion format currently supports textual LLVM IR; native object files,
 bitcode, archive extraction, and link-time transformations are not supported.
 

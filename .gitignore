@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 graph.json
 graph.html
+# Running the documented build-capture example builds the fixture in place.
+/tests/fixtures/build-capture/build/
