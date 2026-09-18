@@ -339,14 +339,7 @@ fn run() -> Result<(), String> {
                     },
                 )?)
             } else if let Some(handle) = explain {
-                let explanation_handle = published
-                    .call_graph_projection()
-                    .call_sites
-                    .iter()
-                    .find(|call_site| call_site.explanation_handle.as_str() == handle)
-                    .map(|call_site| &call_site.explanation_handle)
-                    .ok_or_else(|| format!("unknown explanation handle '{handle}'"))?;
-                serde_json::to_value(application.explain_snapshot(&published, explanation_handle)?)
+                serde_json::to_value(application.expand_explanation(&published, &handle)?)
             } else {
                 return Err(
                     "select a query: --search-callables, --callees, --callers, --call-path, or --explain"
