@@ -581,7 +581,7 @@ fn classify(invocations: Vec<RecordedInvocation>) -> Result<ClassifiedBuild, Str
             classified.compilations.push(Compilation {
                 id: output,
                 working_directory: invocation.working_directory.clone(),
-                source_input: absolute(&invocation.working_directory, &source)
+                source_input: canonical(&absolute(&invocation.working_directory, &source))
                     .display()
                     .to_string(),
                 arguments: invocation.arguments.clone(),
