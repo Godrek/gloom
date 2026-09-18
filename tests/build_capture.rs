@@ -179,15 +179,33 @@ fn callable_names(snapshot: &PublishedSnapshot, target: &str) -> Vec<String> {
     names
 }
 
+/// A compilation is identified by the resolved object it produced, so a test
+/// names one by the object's file name.
 fn compilation<'a>(
     capture: &'a CapturedBuild,
-    id: &str,
+    object: &str,
 ) -> &'a gloom::capture::CapturedCompilation {
+    let suffix = format!("/{object}");
     capture
         .compilations
         .iter()
-        .find(|compilation| compilation.id == id)
-        .unwrap_or_else(|| panic!("captured compilation {id}"))
+        .find(|compilation| compilation.id.ends_with(&suffix))
+        .unwrap_or_else(|| panic!("captured compilation producing {object}"))
+}
+
+fn member_objects(capture: &CapturedBuild) -> Vec<String> {
+    capture
+        .target
+        .compilation_ids
+        .iter()
+        .map(|id| {
+            Path::new(id)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
 }
 
 #[test]
@@ -205,10 +223,10 @@ fn captures_compilation_and_link_membership_for_one_executable_target() {
     assert_eq!(snapshot.acquired_inputs().len(), 3);
     let acquisition = snapshot.captured_build().unwrap();
     let capture = &acquisition.capture;
-    assert_eq!(
-        capture.target.compilation_ids,
-        ["main.o", "worker.o", "support.o"]
-    );
+    assert_eq!(member_objects(capture), ["main.o", "worker.o", "support.o"]);
+    for id in &capture.target.compilation_ids {
+        assert!(Path::new(id).is_absolute(), "{id}");
+    }
     assert_eq!(capture.target.name, "server");
     assert!(capture.target.image_path.ends_with("/build/server"));
     assert!(capture.target.link_arguments.contains(&"main.o".to_owned()));
@@ -286,11 +304,9 @@ fn captures_compilation_and_link_membership_for_one_executable_target() {
     let explanation = Application
         .explain_snapshot(&snapshot, &relationships[1].explanation_handle)
         .unwrap();
-    let worker_input = &acquisition.acquired_input_ids[capture
-        .target
-        .compilation_ids
+    let worker_input = &acquisition.acquired_input_ids[member_objects(capture)
         .iter()
-        .position(|id| id == "worker.o")
+        .position(|object| object == "worker.o")
         .unwrap()];
     assert!(
         explanation
@@ -312,11 +328,93 @@ fn publishes_only_the_selected_target_from_the_same_captured_build() {
     assert_eq!(callable_names(&other, "other-tool"), ["main", "other_only"]);
     assert_eq!(other.acquired_inputs().len(), 1);
     let capture = &other.captured_build().unwrap().capture;
-    assert_eq!(capture.target.compilation_ids, ["other.o"]);
+    assert_eq!(member_objects(capture), ["other.o"]);
     assert!(
         compilation(capture, "other.o")
             .source_input
             .ends_with("/other.c")
+    );
+}
+
+#[test]
+fn the_recorded_toolchain_is_the_compiler_that_actually_ran() {
+    let version = require_clang!();
+    let workspace = Workspace::new();
+    let snapshot = capture(&workspace, "toolchain", "server").unwrap();
+    let capture = &snapshot.captured_build().unwrap().capture;
+
+    // The requested compiler was a name; what is identified, wrapped into the
+    // build, and recorded is the one executable that name resolved to.
+    let compiler = Path::new(&capture.toolchain.compiler);
+    assert!(compiler.is_absolute(), "{}", compiler.display());
+    assert!(compiler.is_file(), "{}", compiler.display());
+    let reported = Command::new(compiler).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&reported.stdout)
+            .lines()
+            .next()
+            .unwrap(),
+        capture.toolchain.version
+    );
+    assert_eq!(capture.toolchain.version, version.trim());
+    assert_eq!(
+        String::from_utf8_lossy(
+            &Command::new(compiler)
+                .arg("-dumpmachine")
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .trim(),
+        capture.toolchain.target_triple
+    );
+    // Every published compilation ran that same executable.
+    for compilation in &capture.compilations {
+        assert_eq!(
+            compilation.compiler_arguments[0],
+            capture.toolchain.compiler
+        );
+    }
+
+    // A compiler that reports something else is refused rather than identified
+    // as the one that was asked for.
+    let elsewhere = workspace.directory("elsewhere");
+    let impostor = elsewhere.join("clang");
+    std::fs::write(
+        &impostor,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'clang version 99.0.0'; else echo x86_64-pc-linux-gnu; fi\n",
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&impostor)
+        .status()
+        .unwrap();
+    let project = workspace.project("impostor");
+    let mut substituted = request(&project, &workspace.0.join("impostor-capture"), "server");
+    substituted.compiler = impostor.display().to_string();
+    let error = Application.capture_build(&substituted).unwrap_err();
+    assert!(error.contains("supports Clang 14-20"), "{error}");
+    assert!(error.contains("99.0.0"), "{error}");
+}
+
+#[test]
+fn identically_spelled_objects_of_different_compilations_stay_distinct() {
+    require_clang!();
+    let workspace = Workspace::new();
+    // Two compilations name their output `unit.o` from different working
+    // directories. They are two objects, and the target links both.
+    let script = "set -eu\nmkdir -p a b\ncp support.c a/unit.c\nsed 's/helper/second/' support.c > b/unit.c\ncd a\nclang -c -O0 unit.c -o unit.o\ncd ../b\nclang -c -O0 unit.c -o unit.o\ncd ..\nclang -c -O0 other.c -o other.o\nclang a/unit.o b/unit.o other.o -o app\n";
+    let snapshot = capture_script(&workspace, "colliding", script, "app").unwrap();
+
+    let capture = &snapshot.captured_build().unwrap().capture;
+    assert_eq!(member_objects(capture), ["unit.o", "unit.o", "other.o"]);
+    assert_eq!(capture.compilations.len(), 3);
+    let ids: std::collections::BTreeSet<&String> = capture.target.compilation_ids.iter().collect();
+    assert_eq!(ids.len(), 3, "{:?}", capture.target.compilation_ids);
+    assert_eq!(
+        callable_names(&snapshot, "app"),
+        ["helper", "main", "other_only", "second"]
     );
 }
 
@@ -367,21 +465,99 @@ fn reloading_a_captured_snapshot_revalidates_membership_and_context() {
             "{error}"
         );
     }
+    // Membership, target, and compilations are reread from the recorded
+    // argument vectors on load, so a record that publishes anything those
+    // vectors do not describe never becomes a snapshot again.
+    let members = value["captured_build"]["capture"]["target"]["compilation_ids"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for (field, corruption, diagnostic) in [
+        (
+            "name",
+            json!("another"),
+            "records another image than its link produced",
+        ),
+        (
+            "image_path",
+            json!("/elsewhere/server"),
+            "records another image than its link produced",
+        ),
+        (
+            "compilation_ids",
+            json!([members[0], members[1]]),
+            "publishes membership its link does not name",
+        ),
+        (
+            "compilation_ids",
+            json!([members[1], members[0], members[2]]),
+            "publishes membership its link does not name",
+        ),
+        (
+            "link_arguments",
+            json!(["/usr/bin/clang", "main.o", "-lm", "-o", "server"]),
+            "capture does not model",
+        ),
+        (
+            "link_arguments",
+            json!(["/usr/bin/clang", "main.o", "-o", "server"]),
+            "publishes membership its link does not name",
+        ),
+        (
+            "working_directory",
+            json!("/elsewhere"),
+            "records another image than its link produced",
+        ),
+    ] {
+        let mut corrupted = value.clone();
+        corrupted["captured_build"]["capture"]["target"][field] = corruption;
+        let error = Application
+            .load_snapshot_json(&corrupted.to_string())
+            .unwrap_err();
+        assert!(error.contains(diagnostic), "{field}: {error}");
+    }
+    for (field, corruption, diagnostic) in [
+        (
+            "compiler_arguments",
+            json!(["/usr/bin/clang", "-c", "../other.c", "-o", "main.o"]),
+            "records another source than it compiled",
+        ),
+        (
+            "compiler_arguments",
+            json!(["/usr/bin/clang", "-c", "../main.c", "-o", "elsewhere.o"]),
+            "records another object than it produced",
+        ),
+        (
+            "compiler_arguments",
+            json!(["/usr/bin/clang", "../main.c", "-o", "main.o"]),
+            "does not record a compilation",
+        ),
+        (
+            "object_output",
+            json!("/elsewhere/main.o"),
+            "records another object than it produced",
+        ),
+        (
+            "source_input",
+            json!("/elsewhere/main.c"),
+            "records another source than it compiled",
+        ),
+    ] {
+        let mut corrupted = value.clone();
+        corrupted["captured_build"]["capture"]["compilations"][0][field] = corruption;
+        let error = Application
+            .load_snapshot_json(&corrupted.to_string())
+            .unwrap_err();
+        assert!(error.contains(diagnostic), "{field}: {error}");
+    }
     let mut corrupted = value.clone();
-    corrupted["captured_build"]["capture"]["target"]["name"] = json!("another");
+    corrupted["captured_build"]["capture"]["compilations"][0]["compiler_arguments"][0] =
+        json!("/elsewhere/clang");
     assert!(
         Application
             .load_snapshot_json(&corrupted.to_string())
             .unwrap_err()
-            .contains("disagrees with observation context")
-    );
-    let mut corrupted = value.clone();
-    corrupted["captured_build"]["capture"]["target"]["compilation_ids"] = json!(["main.o"]);
-    assert!(
-        Application
-            .load_snapshot_json(&corrupted.to_string())
-            .unwrap_err()
-            .contains("does not cover acquired inputs")
+            .contains("did not run the identified compiler")
     );
     let mut corrupted = value;
     corrupted["captured_build"]["acquired_input_ids"][0] = json!("unknown");
@@ -514,18 +690,156 @@ fn captured_and_declared_acquisition_answer_bounded_named_queries_identically() 
 }
 
 #[test]
-fn unsupported_or_incomplete_capture_fails_without_reconstructing_configuration() {
+fn a_replay_runs_under_the_environment_its_compilation_ran_under() {
     require_clang!();
     let workspace = Workspace::new();
-    let real_clang = String::from_utf8_lossy(
-        &Command::new("clang")
-            .arg("-print-prog-name=clang")
+    // The build finds `pick.h` only through CPATH, and that header decides
+    // which callable the translation unit calls. A replay that inherited
+    // Gloom's environment instead would compile something the build never did.
+    let script = "set -eu\nmkdir -p build/config\ncat > build/config/pick.h <<'HEADER'\nvoid right(void);\n#define PICKED right\nHEADER\ncat > build/unit.c <<'SOURCE'\n#include \"pick.h\"\nvoid right(void) {}\nvoid wrong(void) {}\nint main(void) { PICKED(); return 0; }\nSOURCE\ncd build\nCPATH=config clang -c -O0 unit.c -o unit.o\nclang unit.o -o picked\n";
+    let snapshot = capture_script(&workspace, "environment", script, "picked").unwrap();
+
+    let result = Application
+        .investigate_snapshot(
+            &snapshot,
+            &investigation(
+                &snapshot,
+                "picked",
+                Investigation::Callees {
+                    caller: CallableSelector::by_label("main"),
+                },
+            ),
+        )
+        .unwrap();
+    let callees: Vec<String> = result
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            InvestigationItem::Relationship { relationship } => {
+                Some(relationship.callee_display_name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(callees, ["right"]);
+    let capture = &snapshot.captured_build().unwrap().capture;
+    assert_eq!(
+        compilation(capture, "unit.o").environment.get("CPATH"),
+        Some(&"config".to_owned())
+    );
+}
+
+#[test]
+fn content_that_changed_after_its_compilation_is_never_published() {
+    require_clang!();
+    let workspace = Workspace::new();
+    // The build compiles a translation unit and then rewrites its source, so
+    // the content on disk at replay is not the content that was compiled.
+    let rewritten = "set -eu\nmkdir -p build\ncd build\ncp ../support.c unit.c\nclang -c -O0 unit.c -o unit.o\nclang -c -O0 ../other.c -o other.o\nsed 's/helper/rewritten/' ../support.c > unit.c\nclang unit.o other.o -o app\n";
+    let error = capture_script(&workspace, "rewritten-source", rewritten, "app").unwrap_err();
+    assert!(error.contains("changed since the compilation"), "{error}");
+    assert!(error.contains("unit.c"), "{error}");
+
+    // The same holds for a header the compilation read.
+    let header = "set -eu\nmkdir -p build\ncd build\ncat > pick.h <<'HEADER'\nvoid helper(void);\nHEADER\ncp ../support.c unit.c\nclang -c -O0 -include pick.h unit.c -o unit.o\nclang -c -O0 ../other.c -o other.o\necho '/* rewritten */' >> pick.h\nclang unit.o other.o -o app\n";
+    let error = capture_script(&workspace, "rewritten-header", header, "app").unwrap_err();
+    assert!(error.contains("changed since the compilation"), "{error}");
+    assert!(error.contains("pick.h"), "{error}");
+
+    // An object rewritten after the link that consumed it is refused too: the
+    // evidence would not be the evidence that was linked.
+    let object = "set -eu\nmkdir -p build\ncd build\ncp ../support.c unit.c\nclang -c -O0 unit.c -o unit.o\nclang -c -O0 ../other.c -o other.o\nclang unit.o other.o -o app\nsed 's/helper/relinked/' ../support.c > unit.c\nclang -c -O0 unit.c -o unit.o\n";
+    let error = capture_script(&workspace, "rewritten-object", object, "app").unwrap_err();
+    assert!(
+        error.contains("changed after the compilation that produced it"),
+        "{error}"
+    );
+
+    // And an object produced only after the link cannot be that link's member.
+    let late = "set -eu\nmkdir -p build\ncd build\nclang -c -O0 ../other.c -o other.o\ncp other.o spare.o\nclang spare.o -o app\nclang -c -O0 ../support.c -o spare.o\n";
+    let error = capture_script(&workspace, "late-object", late, "app").unwrap_err();
+    assert!(
+        error.contains("no captured compilation produced before that link"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_target_linked_again_is_refused_rather_than_published_from_the_first_link() {
+    require_clang!();
+    let workspace = Workspace::new();
+    // The published image is the second link's, and capture does not model
+    // that link, so neither link's membership may be published as the target.
+    let relinked = "set -eu\nmkdir -p build\ncd build\nclang -c -O0 ../other.c -o other.o\nclang other.o -o app\nclang other.o -lm -o app\n";
+    let error = capture_script(&workspace, "relinked", relinked, "app").unwrap_err();
+    assert!(error.contains("linked 'app' 2 times"), "{error}");
+
+    // The same refusal holds when both links are ones capture does model.
+    let twice = "set -eu\nmkdir -p build\ncd build\nclang -c -O0 ../other.c -o other.o\nclang -c -O0 ../support.c -o support.o\nclang other.o -o app\nclang other.o support.o -o app\n";
+    let error = capture_script(&workspace, "linked-twice", twice, "app").unwrap_err();
+    assert!(error.contains("linked 'app' 2 times"), "{error}");
+}
+
+#[test]
+fn link_membership_capture_cannot_read_is_refused_rather_than_partly_modelled() {
+    require_clang!();
+    let workspace = Workspace::new();
+    let real_clang = resolved_clang();
+
+    // An object forwarded straight to the linker is membership no reading of
+    // the driver's inputs would report, so the link is refused outright.
+    for (name, link, expected) in [
+        (
+            "forwarded-object",
+            "clang other.o -Wl,hidden.o -o app",
+            "-Wl,",
+        ),
+        (
+            "linker-argument",
+            "clang other.o -Xlinker hidden.o -o app",
+            "-Xlinker",
+        ),
+        ("separated-library", "clang other.o -l m -o app", "-l"),
+        (
+            // A forwarded `-r` produces a relocatable object, not the
+            // executable image a target's membership describes.
+            "relocatable",
+            "clang -Wl,-r -nostdlib -no-pie other.o -o app",
+            "-Wl,-r",
+        ),
+        ("library-path", "clang other.o -L /usr/lib -o app", "-L"),
+    ] {
+        let script = format!(
+            "set -eu\nmkdir -p build\ncd build\nclang -c -O0 ../other.c -o other.o\n{real_clang} -c -O0 ../support.c -o hidden.o\n{link}\n"
+        );
+        let error = capture_script(&workspace, name, &script, "app").unwrap_err();
+        assert!(
+            error.contains("does not support the link"),
+            "{name}: {error}"
+        );
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+}
+
+/// The absolute path the `clang` on PATH resolves to, for builds that must
+/// reach a compiler capture is not wrapping.
+fn resolved_clang() -> String {
+    String::from_utf8_lossy(
+        &Command::new("sh")
+            .args(["-c", "command -v clang"])
             .output()
             .unwrap()
             .stdout,
     )
     .trim()
-    .to_owned();
+    .to_owned()
+}
+
+#[test]
+fn unsupported_or_incomplete_capture_fails_without_reconstructing_configuration() {
+    require_clang!();
+    let workspace = Workspace::new();
+    let real_clang = resolved_clang();
 
     // A target the captured build never linked.
     let error = capture(&workspace, "unknown-target", "daemon").unwrap_err();

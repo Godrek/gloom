@@ -593,10 +593,19 @@ impl ContributedEvidence {
 }
 
 pub(crate) fn fingerprint_parts(parts: &[&str]) -> String {
+    fingerprint_byte_parts(&parts.iter().map(|part| part.as_bytes()).collect::<Vec<_>>())
+}
+
+/// The same fingerprint over parts that are not text.
+///
+/// A captured build's source and header files are identified by the bytes that
+/// were read, so nothing lossy may stand between those bytes and the
+/// fingerprint that is supposed to tell them apart.
+pub(crate) fn fingerprint_byte_parts(parts: &[&[u8]]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for part in parts {
-        let length = u64::try_from(part.len()).expect("string length must fit in u64");
-        for byte in length.to_le_bytes().iter().chain(part.as_bytes()) {
+        let length = u64::try_from(part.len()).expect("length must fit in u64");
+        for byte in length.to_le_bytes().iter().chain(*part) {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
         }
     }
