@@ -20,6 +20,9 @@ use std::process::Command;
 enum AcquiredInputKind {
     TextualLlvmIr,
     CCompiledToLlvmIr,
+    /// IR obtained by replaying one compilation of a captured build, retained
+    /// as a file so its evidence provenance names an artifact a reader can open.
+    CapturedBuildCompilation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +277,31 @@ impl LlvmTextContributor {
         }
     }
 
+    /// Contributes the IR one captured compilation was replayed into.
+    ///
+    /// The bytes read are the retained `.ll` artifact, the same textual IR this
+    /// contributor reads anywhere else; only the acquisition method differs, so
+    /// that a reader can tell evidence Gloom captured from a build from
+    /// evidence a producer declared.
+    pub(crate) fn contribute_captured_compilation(
+        &self,
+        artifact: &Path,
+        context: &ObservationContext,
+    ) -> Result<EvidenceContribution, String> {
+        let text = fs::read_to_string(artifact)
+            .map_err(|error| format!("{}: {error}", artifact.display()))?;
+        let observations = observe_llvm_ir(&text)?;
+        contribution_from_observations(
+            artifact,
+            context,
+            &AcquiredLlvmIr {
+                text,
+                kind: AcquiredInputKind::CapturedBuildCompilation,
+            },
+            observations,
+        )
+    }
+
     pub fn identity(&self) -> ContributorIdentity {
         ContributorIdentity {
             name: "gloom.llvm-text".into(),
@@ -355,6 +383,9 @@ fn contribution_from_observations(
             acquisition_method: match &acquired.kind {
                 AcquiredInputKind::TextualLlvmIr => "declared-artifact".into(),
                 AcquiredInputKind::CCompiledToLlvmIr => "compiled-source".into(),
+                AcquiredInputKind::CapturedBuildCompilation => {
+                    crate::capture::CAPTURED_ACQUISITION_METHOD.into()
+                }
             },
             content_fingerprint: content_fingerprint.clone(),
         },
@@ -474,7 +505,9 @@ fn contribution_from_observations(
 
 fn evidence_artifact(path: &Path, kind: &AcquiredInputKind, fingerprint: &str) -> String {
     match kind {
-        AcquiredInputKind::TextualLlvmIr => path.display().to_string(),
+        AcquiredInputKind::TextualLlvmIr | AcquiredInputKind::CapturedBuildCompilation => {
+            path.display().to_string()
+        }
         AcquiredInputKind::CCompiledToLlvmIr => {
             format!("generated LLVM IR {fingerprint} from {}", path.display())
         }

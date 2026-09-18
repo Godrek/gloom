@@ -722,6 +722,8 @@ pub struct PublishedSnapshot {
     acquired_inputs: Vec<AcquiredInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     declared_build: Option<crate::acquisition::DeclaredBuildAcquisition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    captured_build: Option<crate::capture::CapturedBuildAcquisition>,
     observation_contexts: Vec<ObservationContext>,
     program_entities: Vec<ProgramEntity>,
     manifestations: Vec<Manifestation>,
@@ -757,6 +759,8 @@ mod wire {
         pub(super) acquired_inputs: Vec<AcquiredInput>,
         #[serde(default)]
         pub(super) declared_build: Option<crate::acquisition::DeclaredBuildAcquisition>,
+        #[serde(default)]
+        pub(super) captured_build: Option<crate::capture::CapturedBuildAcquisition>,
         pub(super) observation_contexts: Vec<ObservationContext>,
         pub(super) program_entities: Vec<ProgramEntity>,
         pub(super) manifestations: Vec<Manifestation>,
@@ -778,6 +782,7 @@ impl TryFrom<wire::PublishedSnapshot> for PublishedSnapshot {
             program_snapshot: document.program_snapshot,
             acquired_inputs: document.acquired_inputs,
             declared_build: document.declared_build,
+            captured_build: document.captured_build,
             observation_contexts: document.observation_contexts,
             program_entities: document.program_entities,
             manifestations: document.manifestations,
@@ -828,6 +833,21 @@ impl PublishedSnapshot {
     ) -> Result<Self, String> {
         acquisition.validate(&self)?;
         self.declared_build = Some(acquisition);
+        Ok(self)
+    }
+
+    /// The build Gloom captured this snapshot's evidence from, when it was
+    /// acquired by capturing a build rather than by ingesting declarations.
+    pub fn captured_build(&self) -> Option<&crate::capture::CapturedBuildAcquisition> {
+        self.captured_build.as_ref()
+    }
+
+    pub(crate) fn with_captured_build(
+        mut self,
+        acquisition: crate::capture::CapturedBuildAcquisition,
+    ) -> Result<Self, String> {
+        acquisition.validate(&self)?;
+        self.captured_build = Some(acquisition);
         Ok(self)
     }
 
@@ -1310,7 +1330,21 @@ impl PublishedSnapshot {
     }
 
     fn validate(&self) -> Result<(), String> {
+        // How a snapshot's evidence was acquired is one account, not two: a
+        // build producer's declaration and Gloom's own capture of a build make
+        // separate assertions about the same membership, and a document
+        // carrying both would leave a reader no way to tell which one the
+        // published evidence answers to.
+        if self.declared_build.is_some() && self.captured_build.is_some() {
+            return Err(
+                "a published snapshot records one build acquisition, either declared or captured"
+                    .into(),
+            );
+        }
         if let Some(acquisition) = &self.declared_build {
+            acquisition.validate(self)?;
+        }
+        if let Some(acquisition) = &self.captured_build {
             acquisition.validate(self)?;
         }
         if self.schema_version != SNAPSHOT_SCHEMA_VERSION {
@@ -3165,6 +3199,7 @@ pub(crate) fn publish(
         },
         acquired_inputs,
         declared_build: None,
+        captured_build: None,
         observation_contexts,
         program_entities,
         manifestations,
