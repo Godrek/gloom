@@ -1,6 +1,7 @@
 pub mod acquisition;
 mod analysis;
 pub mod app;
+pub mod capture;
 mod contributor;
 mod llvm;
 mod model;

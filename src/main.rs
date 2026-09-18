@@ -43,6 +43,41 @@ enum Commands {
         #[arg(short, long, default_value = "snapshot.json")]
         output: PathBuf,
     },
+    /// Capture a real Linux/Clang build and publish one executable target.
+    CaptureBuild {
+        /// The build command to run, after `--`.
+        #[arg(last = true, required = true)]
+        build_command: Vec<String>,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        /// The executable target to publish, named as its link output is.
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        snapshot_id: String,
+        /// A new directory for the compiler wrapper, the invocation log, and
+        /// the IR captured compilations are replayed into.
+        #[arg(long)]
+        capture_dir: PathBuf,
+        #[arg(long, default_value = "clang")]
+        compiler: String,
+        #[arg(short, long, default_value = "snapshot.json")]
+        output: PathBuf,
+        #[arg(long)]
+        html: Option<PathBuf>,
+    },
+    /// Record one wrapped compiler invocation of a build being captured.
+    ///
+    /// Run by the wrapper `capture-build` generates, never by hand.
+    #[command(hide = true)]
+    CaptureCompilation {
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long)]
+        compiler: PathBuf,
+        #[arg(last = true, required = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     /// Build a graph from C or textual LLVM IR.
     Build {
         #[arg(required = true)]
@@ -199,6 +234,47 @@ fn run() -> Result<(), String> {
             let snapshot = application.publish_declared_build(&manifest, &target)?;
             write(&output, &application.export_snapshot_json(&snapshot)?)?;
             println!("Wrote target {target} to {}", output.display());
+        }
+        Commands::CaptureBuild {
+            build_command,
+            project_root,
+            target,
+            snapshot_id,
+            capture_dir,
+            compiler,
+            output,
+            html,
+        } => {
+            let snapshot = application.capture_build(&gloom::capture::BuildCaptureRequest {
+                project_root,
+                build_command,
+                target: target.clone(),
+                program_snapshot_id: snapshot_id,
+                compiler,
+                capture_directory: capture_dir,
+                recorder: std::env::current_exe().map_err(|error| error.to_string())?,
+            })?;
+            write(&output, &application.export_snapshot_json(&snapshot)?)?;
+            if let Some(path) = html {
+                write(&path, &application.render_snapshot_viewer(&snapshot)?)?;
+            }
+            println!(
+                "Captured target {target} from {} translation units to {}",
+                snapshot.acquired_inputs().len(),
+                output.display()
+            );
+        }
+        Commands::CaptureCompilation {
+            log,
+            compiler,
+            arguments,
+        } => {
+            // The wrapper stands in for the compiler, so this command's own
+            // exit status is the compiler's: a build must fail exactly where it
+            // would have failed uncaptured.
+            std::process::exit(gloom::capture::record_compilation(
+                &log, &compiler, &arguments,
+            )?);
         }
         Commands::Build {
             inputs,

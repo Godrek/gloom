@@ -79,6 +79,20 @@ impl Application {
         Ok(crate::acquisition::load(manifest)?.targets)
     }
 
+    /// Capture one real build and publish the selected executable target.
+    ///
+    /// The build runs once, under a compiler wrapper that records every
+    /// invocation. Membership comes from the link Gloom observed, and the
+    /// published evidence from replaying exactly the compilations that link
+    /// named. Anything capture cannot observe is reported rather than
+    /// reconstructed.
+    pub fn capture_build(
+        &self,
+        request: &crate::capture::BuildCaptureRequest,
+    ) -> Result<PublishedSnapshot, String> {
+        crate::capture::publish(request)
+    }
+
     /// Publish only the selected target's declared evidence artifacts.
     pub fn publish_declared_build(
         &self,
