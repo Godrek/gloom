@@ -45,6 +45,13 @@ validates only a small part of that direction.
   potential recursive cycles through the shared Rust and `investigate` interface.
 - Expand compact call-site explanation handles into evidence, target
   derivations, and cross-context correspondence claims.
+- Explore a published snapshot through a [local viewer](docs/local-viewer.md):
+  a loopback-only query service and browser page that select a build target and
+  observation context, then search, expand focused caller and callee
+  neighborhoods, focus paths and cycles, and expand explanation handles through
+  the same bounded named queries as the CLI — without transferring the snapshot
+  to the browser and without any network access, telemetry, or vendored CDN
+  asset.
 
 ## Prototype limitations
 
@@ -128,6 +135,16 @@ gloom query-snapshot snapshot.json --explain \
 gloom view-snapshot snapshot.json -o snapshot.html
 ```
 
+Explore the same snapshot interactively without transferring it to the browser:
+
+```bash
+gloom serve snapshot.json --port 7878
+```
+
+The service listens on the loopback interface only, answers the same bounded
+named queries as `investigate`, and serves a page that loads nothing from a
+network. See the [local viewer](docs/local-viewer.md) workflow.
+
 Name-only caller, callee, and path queries reject ambiguous callable labels,
 reporting each candidate's declaration. Use `--search-callables` or the entity
 ID reported in the snapshot to select the intended callable explicitly.
@@ -144,6 +161,8 @@ Open `graph.html` directly or serve the directory with
 
 ## Documentation
 
+- [Local viewer](docs/local-viewer.md): the loopback query service and
+  focused-neighborhood page.
 - [Product vision](docs/PRODUCT_VISION.md): durable purpose, principles,
   boundaries, and success definition.
 - [Domain language](CONTEXT.md): canonical project terminology.
@@ -154,7 +173,8 @@ Open `graph.html` directly or serve the directory with
 ## Development
 
 The viewer integration tests require Node.js 22 or newer to execute the generated
-standalone HTML and compare its expanded evidence with the explanation query.
+standalone HTML and the served local-viewer page, comparing their expanded
+evidence and issued requests with the query layer's own answers.
 
 ```bash
 cargo fmt --check
