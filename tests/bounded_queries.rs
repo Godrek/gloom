@@ -120,7 +120,7 @@ fn request(query: Investigation) -> BoundedQuery {
             observation_context_ids: vec![context().id],
         },
         resolution_policy: ResolutionPolicy::IncludePossible,
-        world: WorldPolicy::Open,
+        world: WorldPolicy::Open {},
         bounds: QueryBounds {
             max_depth: 4,
             max_results: 100,
@@ -234,7 +234,7 @@ fn cycle_classification_exhaustion_never_emits_a_potential_cycle() {
         start: label("self"),
     });
     for world in [
-        WorldPolicy::Open,
+        WorldPolicy::Open {},
         WorldPolicy::ClosedCallSites {
             call_site_ids: vec![
                 snapshot.call_graph_projection().call_sites[0]
@@ -385,7 +385,7 @@ fn path_uses_only_selected_declared_relationships_and_respects_policies_and_limi
     };
     assert_eq!(relationships.len(), 2);
     assert_eq!(relationships[1].resolution, Resolution::Partial);
-    assert!(matches!(result.world, WorldPolicy::Open));
+    assert!(matches!(result.world, WorldPolicy::Open {}));
     query.resolution_policy = ResolutionPolicy::CompleteOnly;
     assert!(run(&snapshot, &query).items.is_empty());
     query.scope.observation_context_ids = vec![other_context().id];
@@ -506,6 +506,10 @@ fn result_and_step_bounds_are_explicit_and_invalid_or_generic_requests_are_rejec
     let mut wire =
         serde_json::to_value(request(Investigation::Callees { caller: label("a") })).unwrap();
     wire["query"]["relationship_kind"] = "all".into();
+    assert!(serde_json::from_value::<BoundedQuery>(wire).is_err());
+    let mut wire =
+        serde_json::to_value(request(Investigation::Callees { caller: label("a") })).unwrap();
+    wire["world"]["call_site_ids"] = serde_json::json!(["not-a-real-site"]);
     assert!(serde_json::from_value::<BoundedQuery>(wire).is_err());
 }
 

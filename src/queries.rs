@@ -24,7 +24,9 @@ pub enum ResolutionPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum WorldPolicy {
-    Open,
+    // An empty struct variant, not a unit variant: internally tagged unit
+    // variants bypass `deny_unknown_fields`, silently accepting extra fields.
+    Open {},
     /// Completeness applies only to these explicitly enumerated, recorded sites.
     ClosedCallSites {
         call_site_ids: Vec<ProgramEntityId>,
