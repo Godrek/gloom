@@ -94,6 +94,14 @@ impl Application {
         self.explain_snapshot(snapshot, handle)
     }
 
+    /// Serve bounded investigations of one pinned snapshot to a local viewer.
+    pub fn local_query_service(
+        &self,
+        snapshot: PublishedSnapshot,
+    ) -> crate::service::LocalQueryService {
+        crate::service::LocalQueryService::new(snapshot)
+    }
+
     /// Start an incremental declared-build publication boundary shared by readers.
     pub fn publication_session(&self) -> crate::publication::PublicationSession {
         crate::publication::PublicationSession::default()

@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gloom bounded projections</title>
+<style>
+:root{color-scheme:dark;--bg:#11131a;--panel:#191c26;--raised:#222636;--text:#e7e9f2;--muted:#949aae;--accent:#8b7cf6;--warn:#e9bd68;--line:#303545}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}
+main{width:min(1200px,calc(100% - 32px));margin:24px auto 64px}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:14px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
+h3{font-size:13px;margin:16px 0 6px;color:var(--muted)}
+.subtitle{color:var(--muted);margin:0 0 20px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}
+label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px}
+select,input{background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;width:100%}
+input[type=checkbox]{width:auto;margin:0 8px 0 0}
+button{background:var(--raised);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer}
+button:hover:enabled{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#120f24;font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+.row>*{flex:1 1 160px;min-width:0}
+.row>.actions{flex:0 0 auto}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+.contexts{display:grid;gap:8px;max-height:220px;overflow:auto;margin-top:8px}
+.context{display:flex;align-items:flex-start;background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.context span{font:12px ui-monospace,monospace;color:var(--muted);overflow-wrap:anywhere}
+.context strong{display:block;color:var(--text);font:600 12px ui-monospace,monospace;margin-bottom:2px}
+.item{background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0}
+.item.uncertain{border-color:#6f5a2c}
+.item.selected{border-color:var(--accent)}
+.head{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.callable{font:600 13px ui-monospace,monospace;overflow-wrap:anywhere}
+.arrow{color:var(--accent)}
+.tag{border-radius:999px;background:#31374a;color:#bdc3d8;padding:3px 8px;font-size:11px;white-space:nowrap}
+.tag.warn{background:#4a3c22;color:var(--warn)}
+.meta{color:var(--muted);font:12px ui-monospace,monospace;overflow-wrap:anywhere;margin-top:6px}
+.evidence{display:none;border-top:1px solid var(--line);margin-top:10px;padding-top:10px;color:var(--muted)}
+.item.open .evidence{display:block}
+dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:6px 12px;margin:0}
+dt{color:#767e94}
+dd{margin:0;overflow-wrap:anywhere}
+code{font:12px ui-monospace,monospace;color:#c8c2ff}
+.diagram{overflow:auto;border:1px solid var(--line);border-radius:10px;background:#0d0f16;margin-top:8px}
+.diagram text{font:12px ui-monospace,monospace;fill:var(--text)}
+.diagram .focus rect{fill:#2b2450;stroke:var(--accent)}
+.diagram rect{fill:var(--raised);stroke:var(--line);cursor:pointer}
+.diagram line{stroke:#4d5470}
+.diagram .partial line,.diagram line.partial{stroke:var(--warn);stroke-dasharray:5 4}
+.empty{color:var(--muted);padding:12px 0}
+.error{color:#ff9d9d;background:#3a1e24;border:1px solid #6c2f38;border-radius:8px;padding:10px 12px;margin:8px 0;overflow-wrap:anywhere}
+.notice{color:var(--muted);margin:8px 0 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>Bounded projections</h1>
+<p class="subtitle" id="snapshot">Loading the investigation scope&hellip;</p>
+<div id="fault"></div>
+
+<section id="scope-section">
+  <h2>1 &middot; Scope</h2>
+  <div class="row">
+    <div>
+      <label for="target">Build target</label>
+      <select id="target"></select>
+    </div>
+    <div>
+      <label for="policy">Resolution policy</label>
+      <select id="policy">
+        <option value="include-possible">include-possible</option>
+        <option value="complete-only">complete-only</option>
+      </select>
+    </div>
+    <div><label for="max-depth">max_depth</label><input id="max-depth" type="number" min="1" step="1"></div>
+    <div><label for="max-results">max_results</label><input id="max-results" type="number" min="1" step="1"></div>
+    <div><label for="max-steps">max_steps</label><input id="max-steps" type="number" min="1" step="1"></div>
+  </div>
+  <h3>Observation contexts</h3>
+  <div class="contexts" id="contexts"></div>
+</section>
+
+<section id="explore-section">
+  <h2>2 &middot; Explore</h2>
+  <div class="row">
+    <div>
+      <label for="search">Callable label contains</label>
+      <input id="search" type="search" placeholder="worker">
+    </div>
+    <div class="actions"><button id="search-run" class="primary">Search callables</button></div>
+  </div>
+  <div id="matches"></div>
+  <div id="focus-panel" hidden>
+    <h3>Starting point</h3>
+    <div class="item">
+      <div class="head">
+        <span class="callable" id="focus-name"></span>
+        <span class="tag" id="focus-id"></span>
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button id="run-callers">Callers</button>
+        <button id="run-callees">Callees</button>
+        <button id="run-cycles">Recursive cycles</button>
+        <button id="mark-start">Set as path start</button>
+        <button id="mark-end">Set as path end</button>
+        <button id="run-path">Find call path</button>
+      </div>
+      <div class="meta" id="path-selection"></div>
+    </div>
+  </div>
+</section>
+
+<section id="result-section">
+  <h2>3 &middot; Result</h2>
+  <div id="result"><p class="empty">Select a build target and observation context, then search for a callable.</p></div>
+</section>
+</main>
+
+<script>
+const state = {
+  scope: null,
+  target: null,
+  contexts: new Set(),
+  focus: null,
+  pathStart: null,
+  pathEnd: null,
+  result: null,
+  chain: 0,
+};
+
+const $ = id => document.getElementById(id);
+
+function el(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else if (key.startsWith('on')) node[key] = value;
+    else if (value === true) node.setAttribute(key, '');
+    else if (value !== false && value != null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) if (child != null) node.append(child);
+  return node;
+}
+
+function shape(tag, props) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key.startsWith('on')) node[key] = value;
+    else node.setAttribute(key, value);
+  }
+  return node;
+}
+
+function fault(message) {
+  $('fault').replaceChildren(message ? el('div', {class: 'error', text: message}) : '');
+}
+
+async function call(path, body) {
+  const response = await fetch(path, body === undefined
+    ? {headers: {'accept': 'application/json'}}
+    : {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `request to ${path} failed`);
+  return payload;
+}
+
+/* Scope selection ------------------------------------------------------- */
+
+function selectedTarget() {
+  return state.scope.build_targets.find(target => target.build_target === state.target);
+}
+
+function renderContexts() {
+  const target = selectedTarget();
+  state.contexts = new Set();
+  const cards = target.observation_contexts.map((context, index) => {
+    const box = el('input', {type: 'checkbox', id: `context-${index}`});
+    box.checked = index === 0;
+    if (box.checked) state.contexts.add(context.id);
+    box.onchange = () => {
+      if (box.checked) state.contexts.add(context.id); else state.contexts.delete(context.id);
+      if (state.contexts.size > state.scope.maximum_observation_contexts) {
+        box.checked = false;
+        state.contexts.delete(context.id);
+      }
+      renderControls();
+    };
+    return el('label', {class: 'context', for: box.id}, box, el('span', {},
+      el('strong', {text: context.id}),
+      `${context.build_configuration} · ${context.toolchain} · ${context.analysis_stage}` +
+      ` · ${context.extraction_method} ${context.extraction_version}` +
+      (context.runtime_workload ? ` · workload ${context.runtime_workload}` : '')));
+  });
+  $('contexts').replaceChildren(...cards);
+  renderControls();
+}
+
+function renderControls() {
+  const ready = state.contexts.size > 0;
+  for (const id of ['search-run', 'run-callers', 'run-callees', 'run-cycles', 'run-path']) {
+    $(id).disabled = !ready;
+  }
+  if (ready && state.focus) $('focus-panel').hidden = false;
+  $('run-path').disabled = !ready || !state.pathStart || !state.pathEnd;
+  $('path-selection').textContent = state.pathStart || state.pathEnd
+    ? `path start: ${state.pathStart ? state.pathStart.display_name : '—'} · path end: ${state.pathEnd ? state.pathEnd.display_name : '—'}`
+    : 'Mark a start and an end to search for a call path.';
+}
+
+async function loadScope() {
+  state.scope = await call('/investigation-scope');
+  $('snapshot').textContent =
+    `Published snapshot ${state.scope.program_snapshot_id} · schema ${state.scope.snapshot_schema_version}`;
+  $('max-depth').value = state.scope.default_bounds.max_depth;
+  $('max-results').value = state.scope.default_bounds.max_results;
+  $('max-steps').value = state.scope.default_bounds.max_steps;
+  $('max-depth').max = state.scope.maximum_bounds.max_depth;
+  $('max-results').max = state.scope.maximum_bounds.max_results;
+  $('max-steps').max = state.scope.maximum_bounds.max_steps;
+  $('target').replaceChildren(...state.scope.build_targets.map(
+    target => el('option', {value: target.build_target, text: target.build_target})));
+  state.target = state.scope.build_targets.length ? state.scope.build_targets[0].build_target : null;
+  if (!state.target) {
+    $('result').replaceChildren(el('p', {class: 'empty', text: 'This snapshot observed no build target.'}));
+    return;
+  }
+  $('target').value = state.target;
+  $('target').onchange = () => {
+    state.target = $('target').value;
+    state.focus = state.pathStart = state.pathEnd = null;
+    $('focus-panel').hidden = true;
+    $('matches').replaceChildren();
+    renderContexts();
+  };
+  renderContexts();
+}
+
+/* Requests -------------------------------------------------------------- */
+
+function request(query) {
+  return {
+    scope: {build_target: state.target, observation_context_ids: [...state.contexts]},
+    resolution_policy: $('policy').value,
+    world: {kind: 'open'},
+    bounds: {
+      max_depth: Number($('max-depth').value),
+      max_results: Number($('max-results').value),
+      max_steps: Number($('max-steps').value),
+    },
+    query,
+  };
+}
+
+async function investigate(query) {
+  fault(null);
+  try {
+    state.result = await call('/investigate', request(query));
+    state.chain = 0;
+    renderResult();
+  } catch (error) {
+    state.result = null;
+    $('result').replaceChildren(el('p', {class: 'empty', text: 'No result.'}));
+    fault(error.message);
+  }
+}
+
+async function search() {
+  fault(null);
+  try {
+    const found = await call('/investigate', request({name: 'callable-search', label: $('search').value}));
+    renderMatches(found);
+  } catch (error) {
+    $('matches').replaceChildren();
+    fault(error.message);
+  }
+}
+
+function focusOn(entity) {
+  state.focus = entity;
+  $('focus-name').textContent = entity.display_name;
+  $('focus-id').textContent = entity.entity_id;
+  $('focus-panel').hidden = false;
+  renderControls();
+}
+
+function renderMatches(found) {
+  const items = found.items.filter(item => item.kind === 'callable');
+  if (!items.length) {
+    $('matches').replaceChildren(el('p', {class: 'empty', text: 'No callable matched that label in the selected contexts.'}));
+    return;
+  }
+  $('matches').replaceChildren(...items.map(item => {
+    const manifestation = item.manifestation;
+    const declaration = manifestation.declaration;
+    return el('div', {class: 'item'},
+      el('div', {class: 'head'},
+        el('span', {class: 'callable', text: item.display_name}),
+        el('span', {class: 'tag', text: manifestation.defined ? 'defined' : 'declared only'}),
+        el('span', {class: 'tag', text: manifestation.representation}),
+        el('button', {onclick: () => focusOn(item), text: 'Start here'})),
+      el('div', {class: 'meta'},
+        `${item.entity_id} · ${manifestation.acquired_input_path} · identity ` +
+        `${manifestation.contributor_callable_identity.id} (${manifestation.contributor_callable_identity.scope})` +
+        ` · context ${manifestation.observation_context_id}` +
+        (declaration ? ` · declared at ${declaration.source_location.artifact}:${declaration.source_location.line}` : ' · no declaration evidence')));
+  }), truncationNote(found));
+}
+
+function truncationNote(result) {
+  const reasons = result.truncation.length ? result.truncation.join(', ') : 'none';
+  return el('p', {class: 'notice', text:
+    `${result.query_name} · ${result.projection} projection · ${result.relationship_kind} · direction ${result.direction}` +
+    ` · ${result.items.length} item(s) · ${result.steps} step(s) · truncation: ${reasons}` +
+    ` · returned static call sites: ${result.returned_static_call_site_cardinality}`});
+}
+
+/* Result rendering ------------------------------------------------------ */
+
+function chains(result) {
+  return result.items.filter(item => item.kind === 'path' || item.kind === 'cycle');
+}
+
+function renderResult() {
+  const result = state.result;
+  const parts = [truncationNote(result)];
+  if (result.world.kind !== 'open') {
+    parts.push(el('p', {class: 'notice', text:
+      `Closed call-site scope over ${result.world.call_site_ids.length} recorded site(s); ` +
+      `${result.closed_scope_explanation_handles.length} completeness explanation(s) available.`}));
+  } else {
+    parts.push(el('p', {class: 'notice', text:
+      'Open-world projection: a missing claim means only that no claim is recorded.'}));
+  }
+  const drawn = chains(result).length
+    ? drawChain(chains(result)[state.chain].relationships)
+    : drawNeighborhood(result);
+  if (drawn) parts.push(drawn);
+  if (!result.items.length) {
+    parts.push(el('p', {class: 'empty', text: 'No record in the selected scope answers this query.'}));
+  }
+  parts.push(...result.items.map((item, index) => renderItem(item, index)));
+  $('result').replaceChildren(...parts);
+}
+
+function renderItem(item, index) {
+  if (item.kind === 'callable') {
+    return el('div', {class: 'item'},
+      el('div', {class: 'head'}, el('span', {class: 'callable', text: item.display_name})),
+      el('div', {class: 'meta', text: item.entity_id}));
+  }
+  if (item.kind === 'relationship') {
+    const rel = item.relationship;
+    return withEvidence(el('div', {class: 'item' + (rel.resolution === 'complete' ? '' : ' uncertain')},
+      el('div', {class: 'head'},
+        el('span', {class: 'callable', text: rel.caller_display_name}),
+        el('span', {class: 'arrow', text: '→'}),
+        el('span', {class: 'callable', text: rel.callee_display_name}),
+        el('span', {class: 'tag' + (rel.resolution === 'complete' ? '' : ' warn'), text: rel.resolution})),
+      el('div', {class: 'meta', text:
+        `call site ${rel.call_site_id} · resolution context ${rel.resolution_observation_context_id}` +
+        ` · target context ${rel.target_observation_context_id}` +
+        (rel.correspondence_claim_ids.length ? ` · correspondence ${rel.correspondence_claim_ids.join(', ')}` : '')})),
+      rel.explanation_handle);
+  }
+  if (item.kind === 'call-site') {
+    return withEvidence(el('div', {class: 'item uncertain'},
+      el('div', {class: 'head'},
+        el('span', {class: 'callable', text: item.caller_entity_id}),
+        el('span', {class: 'arrow', text: '→'}),
+        el('span', {class: 'callable', text: item.unattributed ? 'unknown target' : 'call site'}),
+        el('span', {class: 'tag warn', text: item.resolution}),
+        item.targets_omitted_by_scope ? el('span', {class: 'tag warn', text: 'targets omitted by scope'}) : null,
+        item.unattributed ? el('span', {class: 'tag warn', text: 'unattributed'}) : null),
+      el('div', {class: 'meta', text:
+        `call site ${item.call_site_id} · context ${item.observation_context_id}`})),
+      item.explanation_handle);
+  }
+  const chainIndex = chains(state.result).indexOf(item);
+  const relationships = item.relationships;
+  const card = el('div', {class: 'item' + (chainIndex === state.chain ? ' selected' : '')},
+    el('div', {class: 'head'},
+      el('span', {class: 'callable', text: relationships.length
+        ? [relationships[0].caller_display_name, ...relationships.map(rel => rel.callee_display_name)].join(' → ')
+        : 'zero-length path'}),
+      el('span', {class: 'tag', text: `${relationships.length} relationship(s)`}),
+      item.kind === 'cycle' ? el('span', {class: 'tag' + (item.classification === 'definite-recursive-cycle' ? '' : ' warn'), text: item.classification}) : null,
+      el('button', {onclick: () => {state.chain = chainIndex; renderResult();}, text: 'Draw'})),
+    item.kind === 'cycle' && item.closed_call_site_scope
+      ? el('div', {class: 'meta', text: `closed call-site scope: ${item.closed_call_site_scope.join(', ')}`})
+      : null,
+    ...relationships.map(rel => withEvidence(
+      el('div', {class: 'meta', text:
+        `${rel.caller_display_name} → ${rel.callee_display_name} · ${rel.resolution} · site ${rel.call_site_id}`}),
+      rel.explanation_handle)));
+  return card;
+}
+
+/* Explanation expansion -------------------------------------------------- */
+
+function withEvidence(node, handle) {
+  const panel = el('div', {class: 'evidence'});
+  const toggle = el('button', {'aria-expanded': 'false', text: 'Evidence', onclick: async () => {
+    const open = node.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', String(open));
+    if (!open || panel.hasChildNodes()) return;
+    panel.replaceChildren(el('p', {class: 'empty', text: 'Expanding the explanation handle…'}));
+    try {
+      panel.replaceChildren(renderExplanation(await call('/explain', {explanation_handle: handle})));
+    } catch (error) {
+      panel.replaceChildren(el('div', {class: 'error', text: error.message}));
+    }
+  }});
+  const head = node.querySelector('.head') || node;
+  if (head === node) node.append(' ', toggle); else head.append(toggle);
+  node.append(panel);
+  return node;
+}
+
+function lines(values) {
+  const list = el('div');
+  if (!values.length) return el('span', {text: 'None'});
+  for (const value of values) list.append(el('div', {}, value));
+  return list;
+}
+
+function renderExplanation(explanation) {
+  const resolution = explanation.call_site_resolution;
+  const evidence = explanation.evidence_records.map(record => el('div', {},
+    el('code', {text: record.evidence_type}), ` · ${record.scope} · supports ${record.support}`,
+    el('div', {class: 'meta', text: record.description}),
+    el('div', {class: 'meta', text:
+      `${record.id} · provenance ${record.source_location.artifact}:${record.source_location.line}` +
+      ` · acquired input ${record.acquired_input_id} · context ${record.observation_context_id}`}),
+    record.completeness_basis
+      ? el('div', {class: 'meta', text:
+        `completeness basis — boundary: ${record.completeness_basis.boundary}; guarantee: ${record.completeness_basis.guarantee}`})
+      : null));
+  return el('dl', {},
+    el('dt', {text: 'Explanation'}), el('dd', {}, el('code', {text: explanation.handle})),
+    el('dt', {text: 'Call site'}), el('dd', {}, el('code', {text: resolution.call_site_id})),
+    el('dt', {text: 'Resolution'}), el('dd', {text: `${resolution.resolution} in ${resolution.observation_context_id}`}),
+    el('dt', {text: 'Evidence'}), el('dd', {}, lines(evidence)),
+    el('dt', {text: 'Target claims'}), el('dd', {}, lines(explanation.target_claims.map(claim =>
+      el('div', {class: 'meta', text: `${claim.id} → manifestation ${claim.target_manifestation_id} · context ${claim.observation_context_id}`})))),
+    el('dt', {text: 'Derivations'}), el('dd', {}, lines(explanation.derivations.map(derivation =>
+      el('div', {class: 'meta', text: `${derivation.rule} → ${derivation.output_claim_id}`})))),
+    el('dt', {text: 'Correspondence'}), el('dd', {}, lines(explanation.correspondence_claims.map(claim =>
+      el('div', {class: 'meta', text:
+        `${claim.id} · rule ${claim.rule} · identity ${claim.contributor_callable_identity.id}` +
+        ` (${claim.contributor_callable_identity.scope}) · ${claim.manifestation_ids.join(' ↔ ')}`})))));
+}
+
+/* Layout — a presentation concern computed entirely in the client -------- */
+
+const BOX_W = 168, BOX_H = 30, COLUMN = 232, ROW = 46, PAD = 16;
+
+function label(text) {
+  return text.length > 20 ? text.slice(0, 19) + '…' : text;
+}
+
+function canvas(columns, edges) {
+  const height = PAD * 2 + Math.max(1, ...columns.map(column => column.length)) * ROW;
+  const width = PAD * 2 + Math.max(1, columns.length) * COLUMN - (COLUMN - BOX_W);
+  const svg = shape('svg', {width, height, viewBox: `0 0 ${width} ${height}`});
+  const at = new Map();
+  columns.forEach((column, x) => column.forEach((entity, y) => {
+    at.set(entity.entity_id, {x: PAD + x * COLUMN, y: PAD + y * ROW});
+  }));
+  for (const edge of edges) {
+    const from = at.get(edge.from), to = at.get(edge.to);
+    if (!from || !to) continue;
+    const line = shape('line', {
+      x1: from.x + BOX_W, y1: from.y + BOX_H / 2, x2: to.x, y2: to.y + BOX_H / 2,
+    });
+    if (edge.resolution !== 'complete') line.setAttribute('class', 'partial');
+    svg.append(line);
+  }
+  columns.forEach((column, x) => column.forEach((entity, y) => {
+    const position = at.get(entity.entity_id);
+    const group = shape('g', {class: entity.entity_id === (state.focus && state.focus.entity_id) ? 'focus' : ''});
+    group.append(shape('rect', {
+      x: position.x, y: position.y, width: BOX_W, height: BOX_H, rx: 8,
+      onclick: () => focusOn({entity_id: entity.entity_id, display_name: entity.display_name}),
+    }));
+    const text = shape('text', {x: position.x + 10, y: position.y + 20});
+    text.textContent = label(entity.display_name);
+    const title = shape('title');
+    title.textContent = `${entity.display_name}\n${entity.entity_id}`;
+    group.append(text, title);
+    svg.append(group);
+  }));
+  return el('div', {class: 'diagram'}, svg);
+}
+
+function drawChain(relationships) {
+  if (!relationships.length) return null;
+  const columns = [[{entity_id: relationships[0].caller_entity_id, display_name: relationships[0].caller_display_name}]];
+  const edges = [];
+  for (const rel of relationships) {
+    columns.push([{entity_id: rel.callee_entity_id, display_name: rel.callee_display_name}]);
+    edges.push({from: rel.caller_entity_id, to: rel.callee_entity_id, resolution: rel.resolution});
+  }
+  return canvas(columns, edges);
+}
+
+function drawNeighborhood(result) {
+  const relationships = result.items.filter(item => item.kind === 'relationship').map(item => item.relationship);
+  if (!relationships.length || !state.focus) return null;
+  const incoming = result.direction === 'incoming';
+  const names = new Map([[state.focus.entity_id, state.focus.display_name]]);
+  const next = new Map();
+  const edges = [];
+  for (const rel of relationships) {
+    names.set(rel.caller_entity_id, rel.caller_display_name);
+    names.set(rel.callee_entity_id, rel.callee_display_name);
+    const from = incoming ? rel.callee_entity_id : rel.caller_entity_id;
+    const to = incoming ? rel.caller_entity_id : rel.callee_entity_id;
+    if (!next.has(from)) next.set(from, []);
+    next.get(from).push(to);
+    edges.push({from, to, resolution: rel.resolution});
+  }
+  const columns = [];
+  let frontier = [state.focus.entity_id];
+  const placed = new Set(frontier);
+  while (frontier.length) {
+    columns.push(frontier.map(id => ({entity_id: id, display_name: names.get(id) || id})));
+    const following = [];
+    for (const id of frontier) {
+      for (const to of next.get(id) || []) {
+        if (placed.has(to)) continue;
+        placed.add(to);
+        following.push(to);
+      }
+    }
+    frontier = following;
+  }
+  for (const [id, name] of names) {
+    if (!placed.has(id)) {
+      placed.add(id);
+      columns[columns.length - 1].push({entity_id: id, display_name: name});
+    }
+  }
+  return canvas(columns, edges);
+}
+
+/* Wiring ----------------------------------------------------------------- */
+
+$('search-run').onclick = search;
+$('search').onkeydown = event => {if (event.key === 'Enter') search();};
+$('run-callers').onclick = () => investigate({name: 'callers', callee: {entity_id: state.focus.entity_id, label: null}});
+$('run-callees').onclick = () => investigate({name: 'callees', caller: {entity_id: state.focus.entity_id, label: null}});
+$('run-cycles').onclick = () => investigate({name: 'recursive-cycles', start: {entity_id: state.focus.entity_id, label: null}});
+$('mark-start').onclick = () => {state.pathStart = state.focus; renderControls();};
+$('mark-end').onclick = () => {state.pathEnd = state.focus; renderControls();};
+$('run-path').onclick = () => investigate({
+  name: 'call-path',
+  start: {entity_id: state.pathStart.entity_id, label: null},
+  end: {entity_id: state.pathEnd.entity_id, label: null},
+});
+$('policy').onchange = () => {if (state.result) fault('Resolution policy changed; run the query again.');};
+
+loadScope().catch(error => fault(error.message));
+</script>
+</body>
+</html>

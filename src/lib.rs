@@ -6,6 +6,7 @@ mod llvm;
 mod model;
 pub mod publication;
 pub mod queries;
+pub mod service;
 mod snapshot;
 mod viewer;
 
